@@ -1,26 +1,36 @@
 import { createFileRoute } from "@tanstack/react-router";
+import { useState } from "react";
+import { Sidebar } from "@/components/builder/Sidebar";
+import { Canvas } from "@/components/builder/Canvas";
+import { ControlPanel } from "@/components/builder/ControlPanel";
 
 export const Route = createFileRoute("/")({
   component: Index,
+  head: () => ({
+    meta: [
+      { title: "AI Конструктор сайтов — создавайте сайты за 30 секунд" },
+      {
+        name: "description",
+        content:
+          "Премиальный AI-инструмент для создания сайтов: опишите идею, выберите стиль и получите готовый дизайн.",
+      },
+    ],
+  }),
 });
 
-// IMPORTANT: Replace this placeholder. For sites with multiple pages (About, Services, Contact, etc.),
-// create separate route files (about.tsx, services.tsx, contact.tsx) — don't put all pages in this file.
-function PlaceholderIndex() {
+function Index() {
+  const [state, setState] = useState<"empty" | "loading" | "result">("empty");
+
+  const handleGenerate = () => {
+    setState("loading");
+    setTimeout(() => setState("empty"), 2400);
+  };
+
   return (
-    <div
-      className="flex min-h-screen items-center justify-center"
-      style={{ backgroundColor: "#fcfbf8" }}
-    >
-      <img
-        data-lovable-blank-page-placeholder="REMOVE_THIS"
-        src="https://cdn.gpteng.co/blank-app-v1.svg"
-        alt="Your app will live here!"
-      />
+    <div className="flex h-screen w-full overflow-hidden bg-background text-foreground">
+      <Sidebar />
+      <Canvas state={state} />
+      <ControlPanel onGenerate={handleGenerate} />
     </div>
   );
-}
-
-function Index() {
-  return <PlaceholderIndex />;
 }
