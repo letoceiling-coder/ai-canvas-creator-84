@@ -4,14 +4,18 @@
  */
 
 import { z } from "zod";
-import { SITE_JSON_SYSTEM_PROMPT } from "@/lib/ai-prompt";
+import { ENGINEER_SCHEMA_AUTOFIX_APPENDIX, SITE_JSON_SYSTEM_PROMPT } from "@/lib/ai-prompt";
 import {
   callChatCompletionsWithFallback,
   type CallChatOptions,
   type ChatMessage,
 } from "@/lib/ollama-openai";
 import { parseAiSiteJson } from "@/lib/site-render";
-import { safeValidateSiteSchema, type SiteSchema } from "@/lib/site-schema";
+import {
+  siteSchemaSchema,
+  normalizeLooseSiteSchemaInputDetailed,
+  type SiteSchema,
+} from "@/lib/site-schema";
 import {
   getToolContextIfEnabled,
   type ToolContextPack,
@@ -164,6 +168,11 @@ export type ProjectMemory = {
     sectionsHash: string;
     lastBuildPath?: string;
   };
+  /**
+   * В сессии уже было авто-исправление SiteSchema (строки в массивах блоков и т.д.).
+   * Пробрасывается в engineer/critic как сигнал строго соблюдать формат.
+   */
+  schemaAutoFixed?: boolean;
 };
 
 export type PipelineConfig = ToolChannelPolicy &
@@ -470,9 +479,11 @@ function safeParseJSON<T>(
   }
 }
 
-function tryParseSiteSchema(
-  raw: string,
-): { ok: true; data: SiteSchema } | { ok: false; error: string } {
+type ParsedSiteSchemaOk = { ok: true; data: SiteSchema; schemaAutoFixed: boolean };
+
+type ParsedSiteSchema = ParsedSiteSchemaOk | { ok: false; error: string };
+
+function tryParseSiteSchema(raw: string): ParsedSiteSchema {
   let parsed: unknown;
   try {
     parsed = parseAiSiteJson(raw);
@@ -482,8 +493,9 @@ function tryParseSiteSchema(
       error: e instanceof Error ? e.message : "JSON-parse-error",
     };
   }
-  const v = safeValidateSiteSchema(parsed);
-  if (v.success) return { ok: true, data: v.data };
+  const { value, schemaAutoFixed } = normalizeLooseSiteSchemaInputDetailed(parsed);
+  const v = siteSchemaSchema.safeParse(value);
+  if (v.success) return { ok: true, data: v.data, schemaAutoFixed };
   return { ok: false, error: v.error.message };
 }
 
@@ -937,7 +949,7 @@ async function engineerSiteJson(
       {
         role: "system",
         content: `${SITE_JSON_SYSTEM_PROMPT}
-${toolAwareSystemAppendix(cfg)}`,
+${toolAwareSystemAppendix(cfg)}${memory.schemaAutoFixed ? ENGINEER_SCHEMA_AUTOFIX_APPENDIX : ""}`,
       },
       { role: "user", content: userBits },
     ],
@@ -957,7 +969,7 @@ async function selfCorrectSiteJson(
   const sys = `${SITE_JSON_SYSTEM_PROMPT}
 
 Исправь JSON ниже. Ошибка: ${err}
-Верни ТОЛЬКО исправленный сырой JSON (без markdown). promptVersion: ${PROMPT_VERSION.engineer}`;
+Верни ТОЛЬКО исправленный сырой JSON (без markdown). promptVersion: ${PROMPT_VERSION.engineer}${memory.schemaAutoFixed ? ENGINEER_SCHEMA_AUTOFIX_APPENDIX : ""}`;
   return callAgent(
     "engineer",
     [
@@ -1268,7 +1280,9 @@ export async function runPipeline(args: {
       let needEngineer = true;
       let needDraftHitl = cfg.enableHITL && iteration === 0;
       let semTry = 0;
-      let parsed: { ok: true; data: SiteSchema } | null = null;
+      /** Один бонусный прогон engineer, если схема потребовала серверной нормализации. */
+      let schemaStrictRetryUsed = false;
+      let parsed: ParsedSiteSchemaOk | null = null;
 
       inner: while (innerStep < innerCap) {
         innerStep += 1;
@@ -1311,12 +1325,34 @@ export async function runPipeline(args: {
             attempts += 1;
           }
           if (!p.ok) throw new Error(`Engineer: invalid SiteSchema — ${p.error}`);
+          if (p.schemaAutoFixed) {
+            memory.schemaAutoFixed = true;
+            if (!schemaStrictRetryUsed) {
+              schemaStrictRetryUsed = true;
+              pushDecision(
+                memory,
+                "pipeline",
+                "schema_autofixed_retry_engineer",
+                "Normalized loose schema; strict JSON retry.",
+              );
+              postProcessHint = `Схема была автоматически приведена к виду SiteSchema (строки в массивах и т.д.). Пересобери тот же замысел в строго валидном JSON: только объекты в pages/sections/components, content всегда объект.`;
+              needEngineer = true;
+              parsed = null;
+              continue inner;
+            }
+            pushDecision(
+              memory,
+              "pipeline",
+              "schema_autofixed_accept",
+              "Accepting normalized schema after engineer retry.",
+            );
+          }
           parsed = p;
           needEngineer = false;
           semTry = 0;
         }
 
-        if (!parsed?.ok) throw new Error("Engineer: draft inner loop без parse");
+        if (!parsed) throw new Error("Engineer: draft inner loop без parse");
 
         rawSiteJson = JSON.stringify(parsed.data);
         memory.rawSiteJson = rawSiteJson;
@@ -1383,6 +1419,7 @@ export async function runPipeline(args: {
                 });
                 const after = tryParseSiteSchema(memory.rawSiteJson ?? "");
                 if (!after.ok) throw new Error(after.error);
+                if (after.schemaAutoFixed) memory.schemaAutoFixed = true;
                 parsed = after;
                 rawSiteJson = memory.rawSiteJson ?? "";
                 needEngineer = false;
@@ -1407,6 +1444,14 @@ export async function runPipeline(args: {
         }
 
         const staticGate = combinedStaticSiteQa(parsed.data);
+        if (parsed.schemaAutoFixed) {
+          pushDecision(
+            memory,
+            "pipeline",
+            "schema_autofix_note",
+            "Normalized loose LLM output; aggregate quality penalized.",
+          );
+        }
         if (staticGate.issues.some((i) => i.severity === "high")) {
           pushDecision(
             memory,
@@ -1472,7 +1517,7 @@ export async function runPipeline(args: {
       }
 
       const parsedFinal = parsed;
-      if (!parsedFinal?.ok) throw new Error("Engineer: draft loop ended without parse");
+      if (!parsedFinal) throw new Error("Engineer: draft loop ended without parse");
 
       let criticResult: CriticReport | null = null;
       let qaResult: QAReport | null = null;
@@ -1555,11 +1600,15 @@ export async function runPipeline(args: {
         }
       }
 
-      const aggregateQuality = aggregatePipelineQualityScore(
+      let aggregateQuality = aggregatePipelineQualityScore(
         criticResult?.qualityScore ?? null,
         qaResult?.score ?? null,
         cfg,
       );
+      if (parsedFinal.schemaAutoFixed) {
+        aggregateQuality = Math.max(0, aggregateQuality - 10);
+        pushDecision(memory, "pipeline", "schema_autofix_agg_penalty", "-10 aggregate quality");
+      }
       pushDecision(memory, "pipeline", "quality_aggregate", String(aggregateQuality));
       if (memory.sessionMetrics) {
         memory.sessionMetrics.qualityHistory.push(aggregateQuality);
@@ -1618,6 +1667,7 @@ export async function runPipeline(args: {
       if (after.ok) {
         rawSiteJson = JSON.stringify(after.data);
         memory.rawSiteJson = rawSiteJson;
+        if (after.schemaAutoFixed) memory.schemaAutoFixed = true;
         pushDecision(memory, "reviewer", "polish_ok", `model:${polished.modelUsed}`);
       } else {
         pushDecision(memory, "reviewer", "polish_skipped", after.error);
@@ -1626,6 +1676,7 @@ export async function runPipeline(args: {
 
     const finalParse = tryParseSiteSchema(rawSiteJson);
     if (!finalParse.ok) throw new Error(finalParse.error);
+    if (finalParse.schemaAutoFixed) memory.schemaAutoFixed = true;
     memory.siteSchema = finalParse.data;
     memory.code = {
       files: [{ path: "site.json", content: rawSiteJson }],
@@ -1699,6 +1750,7 @@ export async function regenerateSection(args: {
     attempts++;
   }
   if (!parsed.ok) throw new Error(parsed.error);
+  if (parsed.schemaAutoFixed) args.memory.schemaAutoFixed = true;
   args.memory.siteSchema = parsed.data;
   args.memory.rawSiteJson = JSON.stringify(parsed.data);
   args.memory.code = {

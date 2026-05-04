@@ -189,6 +189,15 @@ export function siteBlockInnerHtml(block: SiteBlock, index: number): string {
       return `<div class="wrap"><h2>${esc(title || "Gallery")}</h2>${galleryInner(c)}</div>`;
     case "pricing":
       return `<div class="wrap"><h2>${esc(title || "Pricing")}</h2>${body ? `<p class="section-lead">${esc(body)}</p>` : ""}${pricingInner(c)}</div>`;
+    case "page": {
+      const name = pickContent(c, "name", "title", "label", "slug");
+      const nSec = Array.isArray(c.sections) ? c.sections.length : 0;
+      return `<div class="wrap"><p class="eyebrow">Страница</p><h2>${esc(name || "Page")}</h2><p class="muted">Навигация мультистраничного сайта${nSec ? ` · вложенных секций: ${nSec}` : ""}.</p></div>`;
+    }
+    case "text": {
+      const t = pickContent(c, "text", "body", "content") || body;
+      return `<div class="wrap"><p class="section-lead">${esc(t)}</p></div>`;
+    }
   }
 }
 

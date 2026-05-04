@@ -9,6 +9,10 @@ export const sectionTypeSchema = z.enum([
   "about",
   "gallery",
   "pricing",
+  /** Плейсхолдер мультистраничной навигации (название страницы от планировщика). */
+  "page",
+  /** Строковый элемент массива секций/компонентов, приведённый к блоку. */
+  "text",
 ]);
 
 export const blockAnimationTypeSchema = z.enum(["fade-in", "slide-up", "scale", "parallax"]);
@@ -52,31 +56,190 @@ function isPlainRecord(v: unknown): v is Record<string, unknown> {
   return v !== null && typeof v === "object" && !Array.isArray(v);
 }
 
+function emptyRecord(): Record<string, unknown> {
+  return {};
+}
+
+/** Строка названия страницы из планировщика → объект блока `page`. */
+export function coerceStringToPageBlock(title: string): Record<string, unknown> {
+  return {
+    type: "page",
+    content: {
+      name: title,
+      sections: [] as unknown[],
+    },
+    styles: emptyRecord(),
+    animations: emptyRecord(),
+  };
+}
+
+/** Случайная строка в sections/components → блок `text`. */
+export function coerceStringToTextBlock(text: string): Record<string, unknown> {
+  return {
+    type: "text",
+    content: { text },
+    styles: emptyRecord(),
+    animations: emptyRecord(),
+  };
+}
+
+function coerceAnimationsStyles(
+  v: unknown,
+): { value: Record<string, unknown>; fixed: boolean } {
+  if (v == null) return { value: emptyRecord(), fixed: true };
+  if (isPlainRecord(v)) return { value: v, fixed: false };
+  return { value: emptyRecord(), fixed: true };
+}
+
+function normalizeBlockObjectLoose(raw: Record<string, unknown>): {
+  block: Record<string, unknown>;
+  fixed: boolean;
+} {
+  let fixed = false;
+  const type = raw.type;
+  if (typeof type !== "string" || !type.trim()) {
+    return {
+      block: coerceStringToTextBlock(JSON.stringify(raw).slice(0, 200)),
+      fixed: true,
+    };
+  }
+
+  const { value: styles, fixed: fs } = coerceAnimationsStyles(raw.styles);
+  if (fs) fixed = true;
+  const { value: animations, fixed: fa } = coerceAnimationsStyles(raw.animations);
+  if (fa) fixed = true;
+
+  let content: Record<string, unknown>;
+  const c = raw.content;
+  if (typeof c === "string") {
+    content = { text: c };
+    fixed = true;
+  } else if (c == null) {
+    content = {};
+    fixed = true;
+  } else if (isPlainRecord(c)) {
+    content = { ...c };
+  } else {
+    content = { body: String(c) };
+    fixed = true;
+  }
+
+  const block: Record<string, unknown> = {
+    type,
+    content,
+    styles,
+    animations,
+  };
+  if ("animation" in raw && raw.animation != null) block.animation = raw.animation;
+  return { block, fixed };
+}
+
+function normalizeImagesLoose(raw: unknown): { images: unknown[]; fixed: boolean } {
+  if (!Array.isArray(raw)) return { images: [], fixed: false };
+  let fixed = false;
+  const out: string[] = [];
+  for (const x of raw) {
+    if (typeof x === "string") {
+      const s = x.trim();
+      if (s) out.push(s);
+      continue;
+    }
+    if (isPlainRecord(x)) {
+      const u =
+        typeof x.url === "string"
+          ? x.url
+          : typeof x.src === "string"
+            ? x.src
+            : typeof x.href === "string"
+              ? x.href
+              : "";
+      const t = u.trim();
+      if (t) {
+        out.push(t);
+        fixed = true;
+      } else fixed = true;
+      continue;
+    }
+    fixed = true;
+  }
+  return { images: out, fixed };
+}
+
+export type NormalizeLooseSiteSchemaResult = {
+  value: unknown;
+  /** Были приведения строк / мусора / content как string / images не-URL. */
+  schemaAutoFixed: boolean;
+};
+
 /**
- * Убирает из pages/sections/components элементы, которые не похожи на блок
- * (строки с названиями страниц, числа и т.д.). Это снимает типичный сбой модели,
- * когда планировщик кладёт string[] в `pages` вместо объектов SiteBlock.
+ * Приводит типичный «битый» вывод LLM к виду, который пройдёт Zod:
+ * - строки в `pages` → блоки `page` (имя страницы сохраняется);
+ * - строки в `sections`/`components` → блоки `text`;
+ * - у блоков `content` должен быть object; styles/animations — object;
+ * - `images`: только строки URL; объекты с url/src по возможности извлекаются.
  */
-export function normalizeLooseSiteSchemaInput(input: unknown): unknown {
-  if (!isPlainRecord(input)) return input;
+export function normalizeLooseSiteSchemaInputDetailed(
+  input: unknown,
+): NormalizeLooseSiteSchemaResult {
+  if (!isPlainRecord(input)) {
+    return { value: input, schemaAutoFixed: false };
+  }
+  let schemaAutoFixed = false;
   const out: Record<string, unknown> = { ...input };
+
   for (const key of SITE_BLOCK_ARRAY_KEYS) {
     const arr = out[key];
     if (!Array.isArray(arr)) continue;
-    out[key] = arr.filter(
-      (item): item is Record<string, unknown> =>
-        isPlainRecord(item) && typeof item.type === "string",
-    );
+    const next: Record<string, unknown>[] = [];
+    for (const item of arr) {
+      if (typeof item === "string") {
+        schemaAutoFixed = true;
+        const block =
+          key === "pages" ? coerceStringToPageBlock(item) : coerceStringToTextBlock(item);
+        next.push(block);
+        continue;
+      }
+      if (!isPlainRecord(item)) {
+        schemaAutoFixed = true;
+        continue;
+      }
+      if (typeof item.type !== "string" || !item.type.trim()) {
+        schemaAutoFixed = true;
+        continue;
+      }
+      const { block, fixed } = normalizeBlockObjectLoose(item);
+      if (fixed) schemaAutoFixed = true;
+      next.push(block);
+    }
+    out[key] = next;
   }
-  return out;
+
+  if ("images" in out) {
+    if (!Array.isArray(out.images)) {
+      out.images = [];
+      schemaAutoFixed = true;
+    } else {
+      const { images, fixed } = normalizeImagesLoose(out.images);
+      if (fixed) schemaAutoFixed = true;
+      out.images = images;
+    }
+  }
+
+  return { value: out, schemaAutoFixed };
+}
+
+export function normalizeLooseSiteSchemaInput(input: unknown): unknown {
+  return normalizeLooseSiteSchemaInputDetailed(input).value;
 }
 
 /** Парсит неизвестные данные в `SiteSchema` или кидает `ZodError`. */
 export function validateSiteSchema(input: unknown): SiteSchema {
-  return siteSchemaSchema.parse(normalizeLooseSiteSchemaInput(input));
+  const { value } = normalizeLooseSiteSchemaInputDetailed(input);
+  return siteSchemaSchema.parse(value);
 }
 
 /** Без исключений: результат парсинга или ошибка Zod. */
 export function safeValidateSiteSchema(input: unknown) {
-  return siteSchemaSchema.safeParse(normalizeLooseSiteSchemaInput(input));
+  const { value } = normalizeLooseSiteSchemaInputDetailed(input);
+  return siteSchemaSchema.safeParse(value);
 }

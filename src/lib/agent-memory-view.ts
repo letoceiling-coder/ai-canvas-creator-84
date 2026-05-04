@@ -59,6 +59,8 @@ export type ProjectMemoryForView = {
   chatHistory?: { role: "user" | "assistant"; content: string }[];
   /** §20.2 advanced — сводка старых шагов decisionLog для промпта */
   longTermSummary?: string;
+  /** Флаг серверной нормализации SiteSchema — подмешивается в engineer. */
+  schemaAutoFixed?: boolean;
 };
 
 /** Поля пайплайна, нужные для компрессии и adaptive / aggregate score. */
@@ -170,6 +172,7 @@ export function buildCompressedAgentView(
         styleDNA: memory.styleDNA,
         styleLocked: memory.styleLocked,
         designSeed: memory.designSeed,
+        schemaAutoFixed: memory.schemaAutoFixed === true,
         architecture: jsonSlice(memory.architecture, maxArchitectureJsonChars),
         planSummary: memory.plan
           ? {

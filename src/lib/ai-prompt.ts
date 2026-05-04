@@ -20,7 +20,7 @@ export const SITE_JSON_SYSTEM_PROMPT = `Ты генерируешь структ
 У каждого блока опционально поле "animation": { "type": "fade-in" | "slide-up" | "scale" | "parallax", "duration": number } — duration в секундах (или миллисекундах если значение > 10).
 
 Формат ответа — ОДИН JSON-объект SiteSchema:
-- Поля "pages" и "components": только пустой массив [] ИЛИ массив полных объектов блоков в том же виде, что элементы "sections" (поля type, content, styles, animations). Запрещено класть в "pages" строки-названия вроде ["Главная","О нас","Контакты"] — такой вывод ломает схему; для одностраничного лендинга используй "pages": [].
+- Поля "pages" и "components": только [] либо массив объектов блоков (type, content, styles, animations). Не клади голые строки в эти массивы. Если нужны имена страниц для мультистраничности — используй type "page" и content вида { "name": "Главная", "sections": [] }. Для одностраничного лендинга можно "pages": [].
 
 {
   "pages": [],
@@ -37,7 +37,7 @@ export const SITE_JSON_SYSTEM_PROMPT = `Ты генерируешь структ
   "images": []
 }
 
-Допустимые type у блока: hero | features | benefits | cta | footer | about | gallery | pricing (доп. блоки по необходимости).
+Допустимые type у блока: hero | features | benefits | cta | footer | about | gallery | pricing | page (навигация/имя страницы) | text (простой текстовый блок из строки — лучше избегать, используй нормальные секции).
 
 Правила вывода:
 - Верни ТОЛЬКЕ сырой JSON. Ноль символов до или после.
@@ -47,3 +47,11 @@ export const SITE_JSON_SYSTEM_PROMPT = `Ты генерируешь структ
 - "images": [] — массив URL превью (можно пустой: клиент добавит детерминированные placehold.co по ключевым словам промпта).
 
 Поведение chat-first: theme (dark/light), характер секций и визуала выводи из текста брифа пользователя. Не предполагай, что пользователь выберет стиль в отдельной форме.`;
+
+/** Доп. системный текст для engineer после серверного авто-исправления схемы (см. normalizeLooseSiteSchemaInputDetailed). */
+export const ENGINEER_SCHEMA_AUTOFIX_APPENDIX = `
+
+[SCHEMA / КРИТИЧНО] Предыдущий ответ не прошёл строгую схему и был частично исправлен на сервере (например строки внутри pages/sections/components или content не-объект).
+Выведи полностью валидный SiteSchema: каждый элемент массивов pages, sections, components — объект с полями type (строка), content (объект JSON), styles (объект), animations (объект).
+Имена страниц — только как блоки type "page" с content { "name": string, "sections": [] }, либо пустой pages для одностраничника.
+STRICTLY follow this schema — zero raw strings as array elements.`;
