@@ -10,6 +10,8 @@ import {
   Tags,
   MousePointerClick,
   Plus,
+  Clock,
+  FileText,
 } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
@@ -31,9 +33,27 @@ const blocks = [
   { id: "cta", label: "CTA", icon: MousePointerClick, hint: "Призыв к действию" },
 ];
 
+const templates = [
+  { id: "saas", label: "SaaS Лендинг", hint: "Hero · Pricing · CTA", tag: "Популярное" },
+  { id: "portfolio", label: "Портфолио", hint: "Минималистичная сетка", tag: "Новое" },
+  { id: "agency", label: "Агентство", hint: "Кейсы и услуги", tag: "" },
+  { id: "shop", label: "Магазин", hint: "Каталог · Карточки", tag: "" },
+  { id: "startup", label: "Стартап MVP", hint: "Быстрый запуск", tag: "" },
+  { id: "blog", label: "Блог", hint: "Статьи и подписка", tag: "" },
+];
+
+const history = [
+  { id: "1", label: "AI-платформа для маркетинга", time: "2 минуты назад" },
+  { id: "2", label: "Портфолио UX-дизайнера", time: "Сегодня, 14:20" },
+  { id: "3", label: "Лендинг для SaaS аналитики", time: "Вчера" },
+  { id: "4", label: "Магазин керамики", time: "3 дня назад" },
+];
+
 export function Sidebar() {
   const [tab, setTab] = useState<Tab>("sections");
   const [active, setActive] = useState("hero");
+  const [activeTemplate, setActiveTemplate] = useState("saas");
+  const [activeHistory, setActiveHistory] = useState<string | null>(null);
 
   return (
     <aside className="flex h-full w-[260px] shrink-0 flex-col border-r border-border/50 bg-sidebar">
@@ -76,49 +96,135 @@ export function Sidebar() {
       {/* Blocks */}
       <div className="mt-5 flex items-center justify-between px-5 pb-2">
         <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-          Блоки
+          {tab === "sections" ? "Блоки" : tab === "templates" ? "Шаблоны" : "История"}
         </span>
-        <button className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-[var(--panel-elevated)] hover:text-foreground">
-          <Plus className="h-3.5 w-3.5" />
-        </button>
+        {tab !== "history" && (
+          <button className="flex h-6 w-6 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-[var(--panel-elevated)] hover:text-foreground">
+            <Plus className="h-3.5 w-3.5" />
+          </button>
+        )}
       </div>
 
       <ScrollArea className="flex-1 px-3">
-        <div className="flex flex-col gap-1 pb-4">
-          {blocks.map((b) => {
-            const Icon = b.icon;
-            const isActive = active === b.id;
-            return (
-              <button
-                key={b.id}
-                onClick={() => setActive(b.id)}
-                className={cn(
-                  "group flex items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-all duration-200",
-                  isActive
-                    ? "bg-gradient-to-r from-[var(--accent-violet)]/15 to-transparent text-foreground"
-                    : "text-muted-foreground hover:bg-[var(--panel-elevated)]/60 hover:text-foreground"
-                )}
-              >
-                <div
+        <div
+          key={tab}
+          className="flex flex-col gap-1 pb-4 animate-in fade-in-0 slide-in-from-bottom-1 duration-200"
+        >
+          {tab === "sections" &&
+            blocks.map((b) => {
+              const Icon = b.icon;
+              const isActive = active === b.id;
+              return (
+                <button
+                  key={b.id}
+                  onClick={() => setActive(b.id)}
                   className={cn(
-                    "flex h-8 w-8 items-center justify-center rounded-md transition-colors",
+                    "group flex items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-all duration-200",
                     isActive
-                      ? "bg-[var(--accent-violet)]/20 text-[oklch(0.78_0.18_290)]"
-                      : "bg-[var(--panel-elevated)]/60 group-hover:bg-[var(--panel-elevated)]"
+                      ? "bg-gradient-to-r from-[var(--accent-violet)]/15 to-transparent text-foreground"
+                      : "text-muted-foreground hover:bg-[var(--panel-elevated)]/60 hover:text-foreground"
                   )}
                 >
-                  <Icon className="h-4 w-4" />
+                  <div
+                    className={cn(
+                      "flex h-8 w-8 items-center justify-center rounded-md transition-colors",
+                      isActive
+                        ? "bg-[var(--accent-violet)]/20 text-[oklch(0.78_0.18_290)]"
+                        : "bg-[var(--panel-elevated)]/60 group-hover:bg-[var(--panel-elevated)]"
+                    )}
+                  >
+                    <Icon className="h-4 w-4" />
+                  </div>
+                  <div className="flex min-w-0 flex-col">
+                    <span className="text-sm font-medium">{b.label}</span>
+                    <span className="truncate text-[11px] text-muted-foreground">{b.hint}</span>
+                  </div>
+                  {isActive && (
+                    <div className="ml-auto h-1.5 w-1.5 rounded-full bg-[var(--accent-violet)] shadow-[0_0_8px_var(--accent-violet)]" />
+                  )}
+                </button>
+              );
+            })}
+
+          {tab === "templates" &&
+            templates.map((t) => {
+              const isActive = activeTemplate === t.id;
+              return (
+                <button
+                  key={t.id}
+                  onClick={() => setActiveTemplate(t.id)}
+                  className={cn(
+                    "group flex items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-all duration-200",
+                    isActive
+                      ? "bg-gradient-to-r from-[var(--accent-violet)]/15 to-transparent text-foreground"
+                      : "text-muted-foreground hover:bg-[var(--panel-elevated)]/60 hover:text-foreground"
+                  )}
+                >
+                  <div
+                    className={cn(
+                      "flex h-8 w-8 items-center justify-center rounded-md transition-colors",
+                      isActive
+                        ? "bg-[var(--accent-violet)]/20 text-[oklch(0.78_0.18_290)]"
+                        : "bg-[var(--panel-elevated)]/60 group-hover:bg-[var(--panel-elevated)]"
+                    )}
+                  >
+                    <LayoutTemplate className="h-4 w-4" />
+                  </div>
+                  <div className="flex min-w-0 flex-1 flex-col">
+                    <span className="text-sm font-medium">{t.label}</span>
+                    <span className="truncate text-[11px] text-muted-foreground">{t.hint}</span>
+                  </div>
+                  {t.tag && (
+                    <span className="ml-auto rounded-md bg-[var(--panel-elevated)] px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                      {t.tag}
+                    </span>
+                  )}
+                </button>
+              );
+            })}
+
+          {tab === "history" && (
+            <>
+              {history.map((h) => {
+                const isActive = activeHistory === h.id;
+                return (
+                  <button
+                    key={h.id}
+                    onClick={() => setActiveHistory(h.id)}
+                    className={cn(
+                      "group flex items-center gap-3 rounded-lg px-3 py-2.5 text-left transition-all duration-200",
+                      isActive
+                        ? "bg-gradient-to-r from-[var(--accent-violet)]/15 to-transparent text-foreground"
+                        : "text-muted-foreground hover:bg-[var(--panel-elevated)]/60 hover:text-foreground"
+                    )}
+                  >
+                    <div
+                      className={cn(
+                        "flex h-8 w-8 items-center justify-center rounded-md transition-colors",
+                        isActive
+                          ? "bg-[var(--accent-violet)]/20 text-[oklch(0.78_0.18_290)]"
+                          : "bg-[var(--panel-elevated)]/60 group-hover:bg-[var(--panel-elevated)]"
+                      )}
+                    >
+                      <FileText className="h-4 w-4" />
+                    </div>
+                    <div className="flex min-w-0 flex-col">
+                      <span className="truncate text-sm font-medium">{h.label}</span>
+                      <span className="flex items-center gap-1 text-[11px] text-muted-foreground">
+                        <Clock className="h-2.5 w-2.5" />
+                        {h.time}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })}
+              {history.length === 0 && (
+                <div className="px-3 py-8 text-center text-xs text-muted-foreground">
+                  История пуста
                 </div>
-                <div className="flex min-w-0 flex-col">
-                  <span className="text-sm font-medium">{b.label}</span>
-                  <span className="truncate text-[11px] text-muted-foreground">{b.hint}</span>
-                </div>
-                {isActive && (
-                  <div className="ml-auto h-1.5 w-1.5 rounded-full bg-[var(--accent-violet)] shadow-[0_0_8px_var(--accent-violet)]" />
-                )}
-              </button>
-            );
-          })}
+              )}
+            </>
+          )}
         </div>
       </ScrollArea>
 
