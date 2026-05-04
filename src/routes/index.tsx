@@ -1,191 +1,879 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useCallback, useEffect, useState } from "react";
-import { Sidebar } from "@/components/builder/Sidebar";
+import { Loader2 } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { AgentChat, type AgentChatMessage } from "@/components/agent/AgentChat";
+import {
+  SettingsDrawer,
+  type AdvancedBuilderSettings,
+} from "@/components/agent/SettingsDrawer";
 import { Canvas } from "@/components/builder/Canvas";
-import { ControlPanel } from "@/components/builder/ControlPanel";
+import { WhyPanel } from "@/components/builder/WhyPanel";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { Input } from "@/components/ui/input";
+import type { ProjectMemory, HitlAwaitPayload, HITLAction } from "@/lib/orchestrator";
+import { serverRunPipeline } from "@/lib/pipeline-server-fn";
+import type { PlanPatch, StyleDNAShape, ArchitecturePatch, HITLAtomicAction } from "@/lib/hitl";
+import { exportSite, exportReactZip, exportReactProject } from "@/lib/export-site";
+import { type SiteSchema } from "@/lib/site-schema";
+import { siteExportDocumentTitle, siteSchemaToHtml } from "@/lib/site-render";
+import { mergeAutoImages } from "@/lib/site-image-fill";
+import { styleDNAFromControlPanel } from "@/lib/style-dna-from-ui";
+import { inferStyleDNAFromUserIntent } from "@/lib/infer-style-dna";
+import { applyInstantSiteAction, buildChatPipelinePrompt } from "@/lib/agent-actions";
+import { resolveUserIntent } from "@/lib/intent-router";
+import type { DeployHistoryEntry } from "@/components/builder/Canvas";
+
+const DEPLOY_HISTORY_KEY = "ai-builder-deploy-history-v1";
+
+function readDeployHistory(): DeployHistoryEntry[] {
+  try {
+    const raw = localStorage.getItem(DEPLOY_HISTORY_KEY);
+    if (!raw) return [];
+    const j = JSON.parse(raw) as DeployHistoryEntry[];
+    return Array.isArray(j) ? j : [];
+  } catch {
+    return [];
+  }
+}
+
+function pushDeployHistoryEntry(entry: DeployHistoryEntry): void {
+  try {
+    const cur = readDeployHistory();
+    cur.unshift(entry);
+    localStorage.setItem(DEPLOY_HISTORY_KEY, JSON.stringify(cur.slice(0, 20)));
+  } catch {
+    /* noop */
+  }
+}
+
+type ProjectSummary = { id: string; prompt: string; createdAt: string; updatedAt: string };
+
+const CHAT_QUICK_ACTIONS = [
+  { id: "reviews", label: "➕ Отзывы", text: "Добавь отзывы" },
+  { id: "dark", label: "🎨 Темнее", text: "Сделай тёмный стиль" },
+  { id: "pricing", label: "💰 Тарифы", text: "Добавь тарифы" },
+] as const;
+
+const defaultAdvanced: AdvancedBuilderSettings = {
+  style: "premium",
+  theme: "dark",
+  type: "landing",
+  useManualStyleDNA: false,
+  enableHITL: false,
+  designIterations: 2,
+  qualityThreshold: 80,
+};
 
 export const Route = createFileRoute("/")({
   component: Index,
   head: () => ({
     meta: [
-      { title: "AI Конструктор сайтов — создавайте сайты за 30 секунд" },
+      { title: "AI Website Builder — чат и превью" },
       {
         name: "description",
         content:
-          "Премиальный AI-инструмент для создания сайтов: опишите идею, выберите стиль и получите готовый дизайн.",
+          "Опишите сайт в чате — агент подберёт стиль и структуру. Превью и деплой справа.",
       },
     ],
   }),
 });
 
-export type GenParams = {
-  prompt: string;
-  template: string;
-  style: string;
-  theme: string;
-  type: string;
-};
+function hitlSplitLines(s: string): string[] {
+  return s
+    .split(/[\n,]+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+}
 
-function buildMockHtml(p: GenParams) {
-  const isDark = p.theme === "dark";
-  const bg = isDark ? "#0b1020" : "#f8fafc";
-  const fg = isDark ? "#e2e8f0" : "#0f172a";
-  const muted = isDark ? "#94a3b8" : "#475569";
-  const card = isDark ? "#111a33" : "#ffffff";
-  const border = isDark ? "rgba(255,255,255,.08)" : "rgba(15,23,42,.08)";
-  const accent = "linear-gradient(135deg,#8b5cf6,#6366f1)";
+function buildHitlResumeAction(
+  payload: HitlAwaitPayload,
+  pages: string,
+  sections: string,
+  goals: string,
+  dna: StyleDNAShape,
+): HITLAction {
+  if (payload.checkpoint !== "confirm_plan") {
+    return { type: "confirm_plan" };
+  }
+  const p = hitlSplitLines(pages);
+  const sec = hitlSplitLines(sections);
+  const g = hitlSplitLines(goals);
+  const patch: PlanPatch = {};
+  if (JSON.stringify(p) !== JSON.stringify(payload.plan.pages)) patch.pages = p;
+  if (JSON.stringify(sec) !== JSON.stringify(payload.plan.sections)) patch.sections = sec;
+  if (JSON.stringify(g) !== JSON.stringify(payload.plan.goals)) patch.goals = g;
 
-  const title =
-    p.template === "Портфолио"
-      ? "Портфолио дизайнера"
-      : p.template === "Агентство"
-        ? "Цифровое агентство нового поколения"
-        : p.template === "Магазин"
-          ? "Магазин премиальных товаров"
-          : p.template === "Продукт"
-            ? "Продукт, который меняет правила"
-            : "AI-платформа для роста бизнеса";
+  const baseDna: StyleDNAShape = payload.styleDNA ?? {
+    vibe: "",
+    density: "",
+    motion: "",
+    contrast: "",
+  };
+  const dnaPatch: Partial<StyleDNAShape> = {};
+  if (dna.vibe.trim() !== baseDna.vibe) dnaPatch.vibe = dna.vibe.trim();
+  if (dna.density.trim() !== baseDna.density) dnaPatch.density = dna.density.trim();
+  if (dna.motion.trim() !== baseDna.motion) dnaPatch.motion = dna.motion.trim();
+  if (dna.contrast.trim() !== baseDna.contrast) dnaPatch.contrast = dna.contrast.trim();
 
-  const subtitle = p.prompt?.trim()
-    ? p.prompt.trim().slice(0, 180)
-    : "Создано AI за 30 секунд. Адаптивно, быстро, красиво.";
+  const actions: HITLAtomicAction[] = [];
+  if (Object.keys(patch).length > 0) actions.push({ type: "edit_plan", patch });
+  if (Object.keys(dnaPatch).length > 0) actions.push({ type: "update_style_dna", dna: dnaPatch });
 
-  return `<!doctype html><html lang="ru"><head><meta charset="utf-8"/>
-<meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>${title}</title>
-<style>
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{font-family:'Manrope','Inter',system-ui,sans-serif;background:${bg};color:${fg};line-height:1.55;-webkit-font-smoothing:antialiased}
-  .wrap{max-width:1120px;margin:0 auto;padding:0 24px}
-  header{padding:22px 0;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid ${border}}
-  .logo{display:flex;align-items:center;gap:10px;font-weight:700}
-  .logo i{width:28px;height:28px;border-radius:8px;background:${accent};display:inline-block}
-  nav a{color:${muted};text-decoration:none;margin-left:22px;font-size:14px}
-  .hero{padding:96px 0 72px;text-align:center}
-  .badge{display:inline-block;padding:6px 12px;border:1px solid ${border};border-radius:999px;font-size:12px;color:${muted};margin-bottom:22px}
-  h1{font-size:56px;line-height:1.05;letter-spacing:-.03em;font-weight:800;max-width:820px;margin:0 auto 18px}
-  .sub{color:${muted};font-size:18px;max-width:620px;margin:0 auto 32px}
-  .cta{display:inline-flex;gap:12px}
-  .btn{padding:14px 22px;border-radius:12px;font-weight:600;font-size:14px;border:0;cursor:pointer}
-  .btn.primary{background:${accent};color:#fff}
-  .btn.ghost{background:transparent;color:${fg};border:1px solid ${border}}
-  section{padding:72px 0}
-  h2{font-size:34px;letter-spacing:-.02em;margin-bottom:12px;font-weight:700}
-  .lead{color:${muted};margin-bottom:40px;max-width:560px}
-  .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
-  .card{background:${card};border:1px solid ${border};border-radius:18px;padding:26px}
-  .card h3{font-size:18px;margin-bottom:8px;font-weight:600}
-  .card p{color:${muted};font-size:14px}
-  .price{font-size:36px;font-weight:700;margin:8px 0 16px}
-  .ul{list-style:none;color:${muted};font-size:14px}
-  .ul li{padding:6px 0;border-top:1px solid ${border}}
-  footer{padding:40px 0;border-top:1px solid ${border};color:${muted};font-size:13px;text-align:center}
-  @media(max-width:780px){h1{font-size:38px}.grid{grid-template-columns:1fr}}
-</style></head><body>
-<div class="wrap">
-  <header>
-    <div class="logo"><i></i><span>${title.split(" ")[0]}</span></div>
-    <nav><a href="#">Возможности</a><a href="#">Тарифы</a><a href="#">Контакты</a></nav>
-  </header>
-
-  <section class="hero">
-    <span class="badge">✨ ${p.style} · ${p.type}</span>
-    <h1>${title}</h1>
-    <p class="sub">${subtitle}</p>
-    <div class="cta">
-      <button class="btn primary">Начать бесплатно</button>
-      <button class="btn ghost">Смотреть демо</button>
-    </div>
-  </section>
-
-  <section>
-    <h2>Преимущества</h2>
-    <p class="lead">Всё, что нужно, чтобы запустить продукт быстрее.</p>
-    <div class="grid">
-      <div class="card"><h3>Скорость</h3><p>Запуск за минуты, а не недели.</p></div>
-      <div class="card"><h3>Дизайн</h3><p>Премиальный визуал из коробки.</p></div>
-      <div class="card"><h3>Адаптивность</h3><p>Идеально на любом устройстве.</p></div>
-    </div>
-  </section>
-
-  <section>
-    <h2>Тарифы</h2>
-    <p class="lead">Гибкие планы под любой этап роста.</p>
-    <div class="grid">
-      <div class="card"><h3>Старт</h3><div class="price">0 ₽</div><ul class="ul"><li>1 проект</li><li>Базовые блоки</li><li>Поддержка</li></ul></div>
-      <div class="card" style="border-color:#8b5cf6"><h3>Pro</h3><div class="price">990 ₽</div><ul class="ul"><li>Безлимит проектов</li><li>Все шаблоны</li><li>Приоритет</li></ul></div>
-      <div class="card"><h3>Команда</h3><div class="price">2 990 ₽</div><ul class="ul"><li>До 10 человек</li><li>Совместная работа</li><li>SLA</li></ul></div>
-    </div>
-  </section>
-
-  <footer>© ${new Date().getFullYear()} ${title} · Создано AI</footer>
-</div>
-</body></html>`;
+  if (actions.length === 0) return { type: "confirm_plan" };
+  if (actions.length === 1) return actions[0];
+  return { type: "compound", actions };
 }
 
 function Index() {
-  const [prompt, setPrompt] = useState("");
-  const [template, setTemplate] = useState("SaaS");
-  const [style, setStyle] = useState("premium");
-  const [theme, setTheme] = useState("dark");
-  const [type, setType] = useState("landing");
-  const [loading, setLoading] = useState(false);
+  const [adv, setAdv] = useState<AdvancedBuilderSettings>(defaultAdvanced);
+  const [chatMessages, setChatMessages] = useState<AgentChatMessage[]>([]);
+  const [pipelineRunning, setPipelineRunning] = useState(false);
+  const [instantApplying, setInstantApplying] = useState(false);
+  const [pipelineStatus, setPipelineStatus] = useState<string | null>(null);
   const [generatedHtml, setGeneratedHtml] = useState("");
+  const [generatedSite, setGeneratedSite] = useState<SiteSchema | null>(null);
+  const [lastRunMemory, setLastRunMemory] = useState<ProjectMemory | null>(null);
+  const [lastPipelinePrompt, setLastPipelinePrompt] = useState("");
+  const tokenStreamRef = useRef({ buf: "", rafId: 0, agentLabel: "" });
+  const hitlResolveRef = useRef<((a: HITLAction) => void) | null>(null);
+  const [hitlPayload, setHitlPayload] = useState<HitlAwaitPayload | null>(null);
+  const [hitlPages, setHitlPages] = useState("");
+  const [hitlSections, setHitlSections] = useState("");
+  const [hitlGoals, setHitlGoals] = useState("");
+  const [hitlVibe, setHitlVibe] = useState("");
+  const [hitlDensity, setHitlDensity] = useState("");
+  const [hitlMotion, setHitlMotion] = useState("");
+  const [hitlContrast, setHitlContrast] = useState("");
+  const [hitlArchJson, setHitlArchJson] = useState("");
+  const [hitlSectionOrder, setHitlSectionOrder] = useState("");
+  const [hitlDraftSectionId, setHitlDraftSectionId] = useState("");
+  const [hitlRefineHint, setHitlRefineHint] = useState("");
+  const [deployLoading, setDeployLoading] = useState(false);
+  const [deployUrl, setDeployUrl] = useState<string | null>(null);
+  const [deployError, setDeployError] = useState<string | null>(null);
+  const [deployHistory, setDeployHistory] = useState<DeployHistoryEntry[]>([]);
+  const [selfHostLoading, setSelfHostLoading] = useState(false);
+  const [selfHostPhase, setSelfHostPhase] = useState<
+    "idle" | "running" | "success" | "failed" | "unknown"
+  >("idle");
+  const [selfHostMessage, setSelfHostMessage] = useState<string | null>(null);
+  const selfHostPollAbortRef = useRef<AbortController | null>(null);
+  const [projectList, setProjectList] = useState<ProjectSummary[]>([]);
+  const [projectIdLoading, setProjectIdLoading] = useState<string | null>(null);
+  const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [projectMessage, setProjectMessage] = useState<string | null>(null);
 
-  const handleGenerate = useCallback(() => {
-    if (loading) return;
-    setLoading(true);
-    setGeneratedHtml("");
-    const params: GenParams = { prompt, template, style, theme, type };
-    // Mock generation — replace with real fetch('/generate', ...) when API is ready
-    window.setTimeout(() => {
-      setGeneratedHtml(buildMockHtml(params));
-      setLoading(false);
-    }, 1500);
-  }, [loading, prompt, template, style, theme, type]);
+  const refreshProjects = useCallback(async () => {
+    try {
+      const res = await fetch("/api/projects");
+      const data = (await res.json()) as { projects?: ProjectSummary[]; error?: string };
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      setProjectList(data.projects ?? []);
+    } catch {
+      /* optional */
+    }
+  }, []);
 
-  // ⌘/Ctrl + Enter to generate
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if ((e.metaKey || e.ctrlKey) && e.key === "Enter") {
-        e.preventDefault();
-        handleGenerate();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [handleGenerate]);
+    setDeployHistory(readDeployHistory());
+  }, []);
 
-  const canvasState: "empty" | "loading" | "result" = loading
+  useEffect(() => {
+    void refreshProjects();
+  }, [refreshProjects]);
+
+  useEffect(() => {
+    if (!hitlPayload) return;
+    if (hitlPayload.checkpoint === "confirm_plan") {
+      setHitlPages(hitlPayload.plan.pages.join("\n"));
+      setHitlSections(hitlPayload.plan.sections.join("\n"));
+      setHitlGoals(hitlPayload.plan.goals.join("\n"));
+      const d = hitlPayload.styleDNA;
+      setHitlVibe(d?.vibe ?? "");
+      setHitlDensity(d?.density ?? "");
+      setHitlMotion(d?.motion ?? "");
+      setHitlContrast(d?.contrast ?? "");
+    } else if (hitlPayload.checkpoint === "confirm_architecture") {
+      setHitlArchJson(hitlPayload.architectureJson);
+      setHitlSectionOrder(hitlPayload.planSections.join("\n"));
+    } else if (hitlPayload.checkpoint === "review_draft") {
+      setHitlDraftSectionId(hitlPayload.sectionOptions[0]?.id ?? "");
+      setHitlRefineHint("");
+    }
+  }, [hitlPayload]);
+
+  const submitHitl = useCallback((action: HITLAction) => {
+    const r = hitlResolveRef.current;
+    hitlResolveRef.current = null;
+    setHitlPayload(null);
+    setPipelineStatus("Продолжаем пайплайн…");
+    r?.(action);
+  }, []);
+
+  const continuePlannerHitl = useCallback(() => {
+    if (!hitlPayload || hitlPayload.checkpoint !== "confirm_plan" || !hitlResolveRef.current) return;
+    const action = buildHitlResumeAction(
+      hitlPayload,
+      hitlPages,
+      hitlSections,
+      hitlGoals,
+      {
+        vibe: hitlVibe,
+        density: hitlDensity,
+        motion: hitlMotion,
+        contrast: hitlContrast,
+      },
+    );
+    submitHitl(action);
+  }, [
+    hitlPayload,
+    hitlPages,
+    hitlSections,
+    hitlGoals,
+    hitlVibe,
+    hitlDensity,
+    hitlMotion,
+    hitlContrast,
+    submitHitl,
+  ]);
+
+  const applyArchitectHitl = useCallback(() => {
+    if (!hitlPayload || hitlPayload.checkpoint !== "confirm_architecture") return;
+    let action: HITLAction = { type: "confirm_architecture" };
+    try {
+      const o = JSON.parse(hitlArchJson) as Record<string, unknown>;
+      const patch: ArchitecturePatch = {};
+      if ("layout" in o) patch.layout = o.layout;
+      if ("components" in o) patch.components = o.components as unknown[];
+      if ("designSystem" in o) patch.designSystem = o.designSystem;
+      const has = Object.keys(patch).length > 0;
+      const order = hitlSplitLines(hitlSectionOrder);
+      const orderChanged =
+        order.length > 0 && JSON.stringify(order) !== JSON.stringify(hitlPayload.planSections);
+      if (has && orderChanged) {
+        action = {
+          type: "compound",
+          actions: [
+            { type: "edit_architecture", patch },
+            { type: "reorder_sections", order },
+          ],
+        };
+      } else if (has) {
+        action = { type: "edit_architecture", patch };
+      } else if (orderChanged) {
+        action = { type: "reorder_sections", order };
+      }
+    } catch {
+      action = { type: "confirm_architecture" };
+    }
+    submitHitl(action);
+  }, [hitlPayload, hitlArchJson, hitlSectionOrder, submitHitl]);
+
+  const handleChatSend = useCallback(
+    async (text: string) => {
+      if (pipelineRunning || instantApplying || hitlPayload) return;
+      const userLine = text.trim();
+      if (!userLine) return;
+
+      const userPrior = chatMessages.filter((m) => m.role === "user").map((m) => m.content);
+      const userThread = [...userPrior, userLine];
+      const pipelinePrompt = buildChatPipelinePrompt(userThread, generatedSite);
+
+      setChatMessages((m) => [
+        ...m,
+        { id: crypto.randomUUID(), role: "user", content: userLine, at: Date.now() },
+      ]);
+
+      const siteSnapshot = generatedSite;
+      const routed = resolveUserIntent(userLine, Boolean(siteSnapshot));
+
+      if (routed.kind === "instant" && siteSnapshot) {
+        setInstantApplying(true);
+        setHitlPayload(null);
+        setPipelineStatus("Анализирую задачу…");
+        const ts0 = tokenStreamRef.current;
+        ts0.buf = "";
+        ts0.agentLabel = "";
+        if (ts0.rafId) {
+          cancelAnimationFrame(ts0.rafId);
+          ts0.rafId = 0;
+        }
+        await new Promise<void>((r) => requestAnimationFrame(() => r()));
+
+        try {
+          setPipelineStatus("Применяю правку к превью…");
+          const { site, summary } = applyInstantSiteAction(siteSnapshot, routed.action);
+          const merged = mergeAutoImages(site, userLine);
+          setDeployUrl(null);
+          setDeployError(null);
+          setSelfHostPhase("idle");
+          setSelfHostMessage(null);
+          setLastPipelinePrompt(buildChatPipelinePrompt(userThread, merged));
+          setGeneratedSite(merged);
+          setGeneratedHtml(siteSchemaToHtml(merged));
+          setLastRunMemory((prev) => (prev ? { ...prev, siteSchema: merged } : prev));
+          setChatMessages((m) => [
+            ...m,
+            { id: crypto.randomUUID(), role: "assistant", content: summary, at: Date.now() },
+          ]);
+        } catch (e) {
+          const msg = e instanceof Error ? e.message : "Ошибка правки";
+          setChatMessages((m) => [
+            ...m,
+            {
+              id: crypto.randomUUID(),
+              role: "assistant",
+              content: `Не удалось применить быструю правку: ${msg}`,
+              at: Date.now(),
+            },
+          ]);
+        } finally {
+          setPipelineStatus(null);
+          setInstantApplying(false);
+        }
+        return;
+      }
+
+      setPipelineRunning(true);
+      setPipelineStatus("Анализирую задачу и подбираю структуру…");
+      setHitlPayload(null);
+      const ts = tokenStreamRef.current;
+      ts.buf = "";
+      ts.agentLabel = "";
+      if (ts.rafId) {
+        cancelAnimationFrame(ts.rafId);
+        ts.rafId = 0;
+      }
+
+      const initialStyleDNA = adv.useManualStyleDNA
+        ? styleDNAFromControlPanel(adv.style, adv.theme, adv.type)
+        : inferStyleDNAFromUserIntent(pipelinePrompt);
+
+      try {
+        setPipelineStatus("Генерация на сервере…");
+        const pipelineResult = await serverRunPipeline({
+          data: {
+            prompt: pipelinePrompt,
+            config: {
+              enableHITL: adv.enableHITL,
+              designIterations: adv.designIterations,
+              qualityThreshold: adv.qualityThreshold,
+            },
+            initialStyleDNA,
+          },
+        });
+
+        if (!pipelineResult.ok) {
+          throw new Error(pipelineResult.error);
+        }
+        const memory = pipelineResult.memory;
+
+        const site = memory.siteSchema;
+        if (!site) {
+          setChatMessages((m) => [
+            ...m,
+            {
+              id: crypto.randomUUID(),
+              role: "assistant",
+              content: "Не удалось получить валидный сайт. Попробуйте уточнить запрос.",
+              at: Date.now(),
+            },
+          ]);
+          return;
+        }
+
+        const merged = mergeAutoImages(site, pipelinePrompt);
+        setDeployUrl(null);
+        setDeployError(null);
+        setSelfHostPhase("idle");
+        setSelfHostMessage(null);
+        setLastPipelinePrompt(pipelinePrompt);
+        setGeneratedSite(merged);
+        setGeneratedHtml(siteSchemaToHtml(merged));
+        setLastRunMemory(memory);
+        setPipelineStatus(null);
+        setChatMessages((m) => [
+          ...m,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content:
+              "Готово. Сайт обновлён в превью справа. Можете попросить правки одним сообщением (например: «добавь отзывы» или «сделай тёмнее»).",
+            at: Date.now(),
+          },
+        ]);
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : "Ошибка запроса";
+        setPipelineStatus(null);
+        setChatMessages((m) => [
+          ...m,
+          {
+            id: crypto.randomUUID(),
+            role: "assistant",
+            content: `Ошибка: ${msg}`,
+            at: Date.now(),
+          },
+        ]);
+      } finally {
+        setPipelineRunning(false);
+      }
+    },
+    [
+      pipelineRunning,
+      instantApplying,
+      hitlPayload,
+      chatMessages,
+      generatedSite,
+      adv.useManualStyleDNA,
+      adv.style,
+      adv.theme,
+      adv.type,
+      adv.enableHITL,
+      adv.designIterations,
+      adv.qualityThreshold,
+    ],
+  );
+
+  const handleExportZip = useCallback(() => {
+    if (!generatedSite) return;
+    void exportSite(generatedSite).catch((err) => {
+      console.error(err);
+      window.alert(err instanceof Error ? err.message : "Не удалось сформировать ZIP");
+    });
+  }, [generatedSite]);
+
+  const handleExportReact = useCallback(() => {
+    if (!generatedSite) return;
+    void exportReactZip(exportReactProject(generatedSite), "react-site-export.zip").catch((err) => {
+      console.error(err);
+      window.alert(err instanceof Error ? err.message : "Не удалось сформировать React ZIP");
+    });
+  }, [generatedSite]);
+
+  const handleDeploy = useCallback(async () => {
+    if (!generatedSite) return;
+    setDeployLoading(true);
+    setDeployError(null);
+    setDeployUrl(null);
+    pushDeployHistoryEntry({ ts: Date.now(), kind: "vercel", status: "running" });
+    setDeployHistory(readDeployHistory());
+    try {
+      const files = exportReactProject(generatedSite);
+      const projectName = siteExportDocumentTitle(generatedSite).slice(0, 64).trim() || "ai-site";
+      const res = await fetch("/api/deploy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ files, projectName }),
+      });
+      const data = (await res.json()) as { url?: string; error?: string };
+      if (!res.ok) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      if (!data.url) throw new Error("Сервер не вернул url");
+      setDeployUrl(data.url);
+      pushDeployHistoryEntry({
+        ts: Date.now(),
+        kind: "vercel",
+        status: "success",
+        url: data.url,
+      });
+      setDeployHistory(readDeployHistory());
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Ошибка деплоя";
+      setDeployError(msg);
+      pushDeployHistoryEntry({
+        ts: Date.now(),
+        kind: "vercel",
+        status: "failed",
+        detail: msg,
+      });
+      setDeployHistory(readDeployHistory());
+    } finally {
+      setDeployLoading(false);
+    }
+  }, [generatedSite]);
+
+  const handleDeploySelfHost = useCallback(async () => {
+    if (!generatedSite) return;
+    selfHostPollAbortRef.current?.abort();
+    const ac = new AbortController();
+    selfHostPollAbortRef.current = ac;
+    setSelfHostLoading(true);
+    setSelfHostPhase("running");
+    setSelfHostMessage(null);
+    pushDeployHistoryEntry({ ts: Date.now(), kind: "self-host", status: "running" });
+    setDeployHistory(readDeployHistory());
+    try {
+      const res = await fetch("/api/deploy/self-host", { method: "POST", signal: ac.signal });
+      const data = (await res.json()) as {
+        success?: boolean;
+        jobId?: string;
+        error?: string;
+        message?: string;
+      };
+      if (!res.ok) {
+        throw new Error(data.error ?? data.message ?? `HTTP ${res.status}`);
+      }
+      const jobId = data.jobId;
+      if (!jobId) throw new Error("Нет jobId от deploy hook");
+
+      const deadline = Date.now() + 120_000;
+      let lastLog = "";
+      while (Date.now() < deadline) {
+        if (ac.signal.aborted) return;
+        await new Promise((r) => setTimeout(r, 2000));
+        const st = await fetch(
+          `/api/deploy/self-host/status?jobId=${encodeURIComponent(jobId)}`,
+          { signal: ac.signal },
+        );
+        const body = (await st.json()) as {
+          status?: string;
+          log?: string;
+          exitCode?: number | null;
+          error?: string;
+        };
+        if (!st.ok) {
+          throw new Error(body.error ?? `status HTTP ${st.status}`);
+        }
+        lastLog = body.log ?? "";
+        setSelfHostMessage(lastLog.slice(-4000));
+        const s = (body.status ?? "").toLowerCase();
+        const badExit = body.exitCode != null && body.exitCode !== 0;
+        if (s === "failed" || s === "error" || badExit) {
+          setSelfHostPhase("failed");
+          pushDeployHistoryEntry({
+            ts: Date.now(),
+            kind: "self-host",
+            status: "failed",
+            detail: lastLog.slice(-500),
+            jobId,
+          });
+          setDeployHistory(readDeployHistory());
+          return;
+        }
+        if (
+          s === "done" ||
+          s === "completed" ||
+          s === "success" ||
+          (s === "idle" && body.exitCode === 0)
+        ) {
+          setSelfHostPhase("success");
+          pushDeployHistoryEntry({
+            ts: Date.now(),
+            kind: "self-host",
+            status: "success",
+            jobId,
+          });
+          setDeployHistory(readDeployHistory());
+          return;
+        }
+      }
+      setSelfHostPhase("unknown");
+      pushDeployHistoryEntry({
+        ts: Date.now(),
+        kind: "self-host",
+        status: "unknown",
+        detail: "timeout polling",
+        jobId,
+      });
+      setDeployHistory(readDeployHistory());
+    } catch (e) {
+      if (ac.signal.aborted) return;
+      const msg = e instanceof Error ? e.message : String(e);
+      setSelfHostPhase("failed");
+      setSelfHostMessage(msg);
+      pushDeployHistoryEntry({
+        ts: Date.now(),
+        kind: "self-host",
+        status: "failed",
+        detail: msg,
+      });
+      setDeployHistory(readDeployHistory());
+    } finally {
+      setSelfHostLoading(false);
+    }
+  }, [generatedSite]);
+
+  const handleSaveProject = useCallback(async () => {
+    if (!generatedSite) return;
+    setProjectMessage(null);
+    try {
+      const bodyPrompt = lastPipelinePrompt.trim();
+      if (!bodyPrompt) {
+        setProjectMessage("Сначала сгенерируйте сайт из чата.");
+        return;
+      }
+      const res = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt: bodyPrompt, siteSchema: generatedSite }),
+      });
+      const data = (await res.json()) as { id?: string; error?: string };
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      setProjectMessage(`Сохранено: ${data.id ?? "ok"}`);
+      await refreshProjects();
+      if (data.id) setSelectedProjectId(data.id);
+    } catch (e) {
+      setProjectMessage(e instanceof Error ? e.message : "Ошибка сохранения");
+    }
+  }, [generatedSite, lastPipelinePrompt, refreshProjects]);
+
+  const handleLoadProject = useCallback(async () => {
+    const id = selectedProjectId.trim();
+    if (!id) return;
+    setProjectIdLoading(id);
+    setProjectMessage(null);
+    try {
+      const res = await fetch(`/api/projects/${encodeURIComponent(id)}`);
+      const data = (await res.json()) as {
+        id?: string;
+        siteSchema?: SiteSchema;
+        prompt?: string;
+        error?: string;
+      };
+      if (!res.ok) throw new Error(data.error ?? `HTTP ${res.status}`);
+      if (!data.siteSchema) throw new Error("нет siteSchema");
+      const merged = mergeAutoImages(data.siteSchema, data.prompt ?? "");
+      setGeneratedSite(merged);
+      setGeneratedHtml(siteSchemaToHtml(merged));
+      setLastPipelinePrompt(data.prompt ?? "");
+      setLastRunMemory(null);
+      setDeployUrl(null);
+      setDeployError(null);
+      setSelfHostPhase("idle");
+      setSelfHostMessage(null);
+      setProjectMessage(`Открыт проект ${data.id ?? id}`);
+      setChatMessages((m) => [
+        ...m,
+        {
+          id: crypto.randomUUID(),
+          role: "assistant",
+          content: `Загружен сохранённый проект. Продолжайте правки в чате.`,
+          at: Date.now(),
+        },
+      ]);
+    } catch (e) {
+      setProjectMessage(e instanceof Error ? e.message : "Ошибка загрузки");
+    } finally {
+      setProjectIdLoading(null);
+    }
+  }, [selectedProjectId]);
+
+  const canvasState: "empty" | "loading" | "result" = pipelineRunning
     ? "loading"
-    : generatedHtml
+    : generatedHtml || generatedSite
       ? "result"
       : "empty";
 
+  const hitlPanel =
+    hitlPayload?.checkpoint === "confirm_plan" ? (
+      <div className="space-y-2 p-3">
+        <p className="text-xs font-semibold">Согласование плана</p>
+        <div className="grid gap-2 sm:grid-cols-3">
+          <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
+            Страницы
+            <Textarea
+              value={hitlPages}
+              onChange={(e) => setHitlPages(e.target.value)}
+              className="min-h-[64px] text-xs"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
+            Секции
+            <Textarea
+              value={hitlSections}
+              onChange={(e) => setHitlSections(e.target.value)}
+              className="min-h-[64px] text-xs"
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-[10px] text-muted-foreground">
+            Цели
+            <Textarea
+              value={hitlGoals}
+              onChange={(e) => setHitlGoals(e.target.value)}
+              className="min-h-[64px] text-xs"
+            />
+          </label>
+        </div>
+        <div className="grid grid-cols-2 gap-1">
+          <Input value={hitlVibe} onChange={(e) => setHitlVibe(e.target.value)} className="h-8 text-xs" />
+          <Input
+            value={hitlDensity}
+            onChange={(e) => setHitlDensity(e.target.value)}
+            className="h-8 text-xs"
+          />
+          <Input value={hitlMotion} onChange={(e) => setHitlMotion(e.target.value)} className="h-8 text-xs" />
+          <Input
+            value={hitlContrast}
+            onChange={(e) => setHitlContrast(e.target.value)}
+            className="h-8 text-xs"
+          />
+        </div>
+        <Button type="button" size="sm" className="w-full" onClick={() => continuePlannerHitl()}>
+          Продолжить
+        </Button>
+      </div>
+    ) : hitlPayload?.checkpoint === "confirm_architecture" ? (
+      <div className="space-y-2 p-3">
+        <p className="text-xs font-semibold">Согласование архитектуры</p>
+        <Textarea
+          value={hitlArchJson}
+          onChange={(e) => setHitlArchJson(e.target.value)}
+          className="min-h-[100px] font-mono text-[10px]"
+        />
+        <Textarea
+          value={hitlSectionOrder}
+          onChange={(e) => setHitlSectionOrder(e.target.value)}
+          className="min-h-[48px] text-xs"
+        />
+        <div className="flex flex-wrap gap-2">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => submitHitl({ type: "confirm_architecture" })}
+          >
+            ОК
+          </Button>
+          <Button type="button" size="sm" onClick={() => applyArchitectHitl()}>
+            Применить
+          </Button>
+        </div>
+      </div>
+    ) : hitlPayload?.checkpoint === "review_draft" ? (
+      <div className="space-y-2 p-3">
+        <p className="text-xs font-semibold">Черновик сайта</p>
+        <pre className="max-h-[120px] overflow-auto rounded border bg-background/40 p-2 text-[9px]">
+          {hitlPayload.preview.slice(0, 4000)}
+        </pre>
+        <select
+          className="h-8 w-full rounded-md border bg-background px-2 text-xs"
+          value={hitlDraftSectionId}
+          onChange={(e) => setHitlDraftSectionId(e.target.value)}
+        >
+          {hitlPayload.sectionOptions.map((o) => (
+            <option key={o.id} value={o.id}>
+              {o.id} ({o.type})
+            </option>
+          ))}
+        </select>
+        <Input
+          value={hitlRefineHint}
+          onChange={(e) => setHitlRefineHint(e.target.value)}
+          className="h-8 text-xs"
+          placeholder="Подсказка refine"
+        />
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" size="sm" onClick={() => submitHitl({ type: "confirm_draft" })}>
+            Дальше
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => submitHitl({ type: "regenerate_section", sectionId: hitlDraftSectionId })}
+          >
+            Секция
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() => submitHitl({ type: "refine_all", hint: hitlRefineHint.trim() || undefined })}
+          >
+            Усилить
+          </Button>
+        </div>
+      </div>
+    ) : undefined;
+
   return (
     <div className="flex h-screen w-full overflow-hidden bg-background text-foreground">
-      <Sidebar />
+      <div className="flex h-full min-w-0 w-[min(100%,420px)] shrink-0 flex-col border-r border-border/50 bg-sidebar">
+        <div className="flex shrink-0 flex-wrap items-center gap-2 border-b border-border/40 px-3 py-2">
+          <span className="mr-1 text-xs font-semibold tracking-tight">Builder</span>
+          <SettingsDrawer settings={adv} onChange={setAdv} />
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            disabled={!generatedSite || Boolean(projectIdLoading)}
+            onClick={() => void handleSaveProject()}
+          >
+            Сохранить
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={!selectedProjectId || Boolean(projectIdLoading)}
+            onClick={() => void handleLoadProject()}
+          >
+            {projectIdLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : "Открыть"}
+          </Button>
+          <select
+            className="h-8 max-w-[140px] rounded-md border border-border/60 bg-[var(--panel-elevated)]/60 px-2 text-[11px]"
+            value={selectedProjectId}
+            onChange={(e) => setSelectedProjectId(e.target.value)}
+          >
+            <option value="">Проект…</option>
+            {projectList.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.id.slice(0, 8)}…
+              </option>
+            ))}
+          </select>
+        </div>
+        {projectMessage ? (
+          <p className="px-3 py-1 text-[10px] text-muted-foreground">{projectMessage}</p>
+        ) : null}
+        <div className="min-h-0 flex-1">
+          <AgentChat
+            showBrandHeader={false}
+            className="h-full"
+            messages={chatMessages}
+            onSend={(t) => void handleChatSend(t)}
+            disabled={pipelineRunning || instantApplying || Boolean(hitlPayload)}
+            statusLine={pipelineStatus}
+            hitlPanel={hitlPanel}
+            quickActions={generatedSite ? [...CHAT_QUICK_ACTIONS] : []}
+          />
+        </div>
+        <WhyPanel
+          memory={lastRunMemory}
+          compact
+          className="max-h-[30vh] shrink-0 border-t border-border/40 rounded-none border-x-0 border-b-0"
+        />
+      </div>
+
       <Canvas
         state={canvasState}
         html={generatedHtml}
+        siteSchema={generatedSite}
         onReset={() => {
           setGeneratedHtml("");
-          setPrompt("");
+          setGeneratedSite(null);
+          setLastRunMemory(null);
+          setChatMessages([]);
+          setDeployUrl(null);
+          setDeployError(null);
+          setSelfHostPhase("idle");
+          setSelfHostMessage(null);
+          setLastPipelinePrompt("");
         }}
-      />
-      <ControlPanel
-        prompt={prompt}
-        onPromptChange={setPrompt}
-        template={template}
-        onTemplateChange={setTemplate}
-        style={style}
-        onStyleChange={setStyle}
-        theme={theme}
-        onThemeChange={setTheme}
-        type={type}
-        onTypeChange={setType}
-        loading={loading}
-        onGenerate={handleGenerate}
+        onExportZip={generatedSite ? handleExportZip : null}
+        onExportReact={generatedSite ? handleExportReact : null}
+        onDeploy={generatedSite ? handleDeploy : null}
+        onDeploySelfHost={generatedSite ? handleDeploySelfHost : null}
+        deployLoading={deployLoading}
+        selfHostLoading={selfHostLoading}
+        deployUrl={deployUrl}
+        deployError={deployError}
+        selfHostPhase={selfHostPhase}
+        selfHostMessage={selfHostMessage}
+        deployHistory={deployHistory}
+        onRedeploy={generatedSite ? handleDeploy : null}
       />
     </div>
   );

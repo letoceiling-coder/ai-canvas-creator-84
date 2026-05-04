@@ -10,33 +10,99 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ApiProjectsRouteImport } from './routes/api/projects'
+import { Route as ApiDeployRouteImport } from './routes/api/deploy'
+import { Route as ApiProjectsProjectIdRouteImport } from './routes/api/projects.$projectId'
+import { Route as ApiDeploySelfHostRouteImport } from './routes/api/deploy.self-host'
+import { Route as ApiDeploySelfHostStatusRouteImport } from './routes/api/deploy.self-host.status'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiProjectsRoute = ApiProjectsRouteImport.update({
+  id: '/api/projects',
+  path: '/api/projects',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiDeployRoute = ApiDeployRouteImport.update({
+  id: '/api/deploy',
+  path: '/api/deploy',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiProjectsProjectIdRoute = ApiProjectsProjectIdRouteImport.update({
+  id: '/$projectId',
+  path: '/$projectId',
+  getParentRoute: () => ApiProjectsRoute,
+} as any)
+const ApiDeploySelfHostRoute = ApiDeploySelfHostRouteImport.update({
+  id: '/self-host',
+  path: '/self-host',
+  getParentRoute: () => ApiDeployRoute,
+} as any)
+const ApiDeploySelfHostStatusRoute = ApiDeploySelfHostStatusRouteImport.update({
+  id: '/status',
+  path: '/status',
+  getParentRoute: () => ApiDeploySelfHostRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/api/deploy': typeof ApiDeployRouteWithChildren
+  '/api/projects': typeof ApiProjectsRouteWithChildren
+  '/api/deploy/self-host': typeof ApiDeploySelfHostRouteWithChildren
+  '/api/projects/$projectId': typeof ApiProjectsProjectIdRoute
+  '/api/deploy/self-host/status': typeof ApiDeploySelfHostStatusRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/api/deploy': typeof ApiDeployRouteWithChildren
+  '/api/projects': typeof ApiProjectsRouteWithChildren
+  '/api/deploy/self-host': typeof ApiDeploySelfHostRouteWithChildren
+  '/api/projects/$projectId': typeof ApiProjectsProjectIdRoute
+  '/api/deploy/self-host/status': typeof ApiDeploySelfHostStatusRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/api/deploy': typeof ApiDeployRouteWithChildren
+  '/api/projects': typeof ApiProjectsRouteWithChildren
+  '/api/deploy/self-host': typeof ApiDeploySelfHostRouteWithChildren
+  '/api/projects/$projectId': typeof ApiProjectsProjectIdRoute
+  '/api/deploy/self-host/status': typeof ApiDeploySelfHostStatusRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths:
+    | '/'
+    | '/api/deploy'
+    | '/api/projects'
+    | '/api/deploy/self-host'
+    | '/api/projects/$projectId'
+    | '/api/deploy/self-host/status'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to:
+    | '/'
+    | '/api/deploy'
+    | '/api/projects'
+    | '/api/deploy/self-host'
+    | '/api/projects/$projectId'
+    | '/api/deploy/self-host/status'
+  id:
+    | '__root__'
+    | '/'
+    | '/api/deploy'
+    | '/api/projects'
+    | '/api/deploy/self-host'
+    | '/api/projects/$projectId'
+    | '/api/deploy/self-host/status'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ApiDeployRoute: typeof ApiDeployRouteWithChildren
+  ApiProjectsRoute: typeof ApiProjectsRouteWithChildren
 }
 
 declare module '@tanstack/react-router' {
@@ -48,11 +114,83 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/projects': {
+      id: '/api/projects'
+      path: '/api/projects'
+      fullPath: '/api/projects'
+      preLoaderRoute: typeof ApiProjectsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/deploy': {
+      id: '/api/deploy'
+      path: '/api/deploy'
+      fullPath: '/api/deploy'
+      preLoaderRoute: typeof ApiDeployRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/projects/$projectId': {
+      id: '/api/projects/$projectId'
+      path: '/$projectId'
+      fullPath: '/api/projects/$projectId'
+      preLoaderRoute: typeof ApiProjectsProjectIdRouteImport
+      parentRoute: typeof ApiProjectsRoute
+    }
+    '/api/deploy/self-host': {
+      id: '/api/deploy/self-host'
+      path: '/self-host'
+      fullPath: '/api/deploy/self-host'
+      preLoaderRoute: typeof ApiDeploySelfHostRouteImport
+      parentRoute: typeof ApiDeployRoute
+    }
+    '/api/deploy/self-host/status': {
+      id: '/api/deploy/self-host/status'
+      path: '/status'
+      fullPath: '/api/deploy/self-host/status'
+      preLoaderRoute: typeof ApiDeploySelfHostStatusRouteImport
+      parentRoute: typeof ApiDeploySelfHostRoute
+    }
   }
 }
 
+interface ApiDeploySelfHostRouteChildren {
+  ApiDeploySelfHostStatusRoute: typeof ApiDeploySelfHostStatusRoute
+}
+
+const ApiDeploySelfHostRouteChildren: ApiDeploySelfHostRouteChildren = {
+  ApiDeploySelfHostStatusRoute: ApiDeploySelfHostStatusRoute,
+}
+
+const ApiDeploySelfHostRouteWithChildren =
+  ApiDeploySelfHostRoute._addFileChildren(ApiDeploySelfHostRouteChildren)
+
+interface ApiDeployRouteChildren {
+  ApiDeploySelfHostRoute: typeof ApiDeploySelfHostRouteWithChildren
+}
+
+const ApiDeployRouteChildren: ApiDeployRouteChildren = {
+  ApiDeploySelfHostRoute: ApiDeploySelfHostRouteWithChildren,
+}
+
+const ApiDeployRouteWithChildren = ApiDeployRoute._addFileChildren(
+  ApiDeployRouteChildren,
+)
+
+interface ApiProjectsRouteChildren {
+  ApiProjectsProjectIdRoute: typeof ApiProjectsProjectIdRoute
+}
+
+const ApiProjectsRouteChildren: ApiProjectsRouteChildren = {
+  ApiProjectsProjectIdRoute: ApiProjectsProjectIdRoute,
+}
+
+const ApiProjectsRouteWithChildren = ApiProjectsRoute._addFileChildren(
+  ApiProjectsRouteChildren,
+)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ApiDeployRoute: ApiDeployRouteWithChildren,
+  ApiProjectsRoute: ApiProjectsRouteWithChildren,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

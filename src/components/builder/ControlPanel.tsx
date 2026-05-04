@@ -41,6 +41,8 @@ type Props = {
   onTypeChange: (v: string) => void;
   loading: boolean;
   onGenerate: () => void;
+  /** Доп. классы для корневого aside (например flex-1 min-h-0 при колонке с WhyPanel). */
+  className?: string;
 };
 
 export function ControlPanel({
@@ -56,6 +58,7 @@ export function ControlPanel({
   onTypeChange,
   loading,
   onGenerate,
+  className,
 }: Props) {
   const handleChip = (c: string) => {
     onTemplateChange(c);
@@ -63,7 +66,12 @@ export function ControlPanel({
   };
 
   return (
-    <aside className="flex h-full w-[360px] shrink-0 flex-col border-l border-border/50 bg-sidebar">
+    <aside
+      className={cn(
+        "flex h-full w-[360px] shrink-0 flex-col border-l border-border/50 bg-sidebar",
+        className,
+      )}
+    >
       <div className="flex h-14 items-center gap-2 px-5">
         <Wand2 className="h-4 w-4 text-[oklch(0.78_0.18_290)]" />
         <span className="text-sm font-semibold">Параметры генерации</span>
