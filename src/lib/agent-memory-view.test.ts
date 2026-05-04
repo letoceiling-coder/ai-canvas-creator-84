@@ -46,7 +46,7 @@ describe("buildCompressedAgentView", () => {
       userIntent: "x".repeat(200),
       intentType: "landing",
       decisionLog: ["a", "b", "c", "d"].map((s) => createDecisionEntry("t", s)),
-      plan: { pages: [], sections: ["hero"], goals: [] },
+      plan: { pages: [], sections: [{ type: "hero" }], goals: [] },
       architecture: { layout: {}, components: [], designSystem: {} },
     };
     const v = buildCompressedAgentView(memory, "planner", baseCfg) as Record<string, unknown>;

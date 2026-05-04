@@ -1,4 +1,5 @@
 import type { SiteBlock, SiteSchema } from "@/lib/site-schema";
+import { safeParseJson } from "@/lib/json-extract";
 
 function esc(s: unknown): string {
   if (s == null) return "";
@@ -279,12 +280,16 @@ export function sitePreviewStyles(site: SiteSchema): string {
   `.replace(/\s+/g, " ");
 }
 
-/** Достаёт JSON из ответа модели (сырой JSON или fenced ```json). */
+/**
+ * Достаёт JSON из ответа модели (сырой JSON, fenced ```json, текст вокруг).
+ * Делегирует общему `safeParseJson` — НЕ кидает SyntaxError при «грязном» JSON.
+ * Если совсем не удалось распарсить — кидает один типизированный `Error("invalid_json")`,
+ * чтобы вызывающий код мог поймать в существующих try/catch (например, `tryParseSiteSchema`).
+ */
 export function parseAiSiteJson(raw: string): unknown {
-  let t = raw.trim();
-  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fence) t = fence[1].trim();
-  return JSON.parse(t) as unknown;
+  const r = safeParseJson(raw);
+  if (r.ok) return r.data;
+  throw new Error("invalid_json");
 }
 
 export function siteExportStylesheet(site: SiteSchema): string {

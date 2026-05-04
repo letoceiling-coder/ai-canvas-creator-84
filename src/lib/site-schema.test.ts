@@ -50,6 +50,7 @@ const minimalValidSite = {
   styles: { theme: "dark", accentGradient: "linear-gradient(135deg, #000, #111)" },
   animations: {},
   images: [],
+  goals: [],
 };
 
 describe("normalizeLooseSiteSchemaInputDetailed", () => {

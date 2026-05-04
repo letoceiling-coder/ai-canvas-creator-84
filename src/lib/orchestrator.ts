@@ -5,6 +5,7 @@
 
 import { z } from "zod";
 import { ENGINEER_SCHEMA_AUTOFIX_APPENDIX, SITE_JSON_SYSTEM_PROMPT } from "@/lib/ai-prompt";
+import { JSON_OUTPUT_CRITICAL_RULES, safeParseJson } from "@/lib/json-extract";
 import {
   callChatCompletionsWithFallback,
   type CallChatOptions,
@@ -16,6 +17,13 @@ import {
   normalizeLooseSiteSchemaInputDetailed,
   type SiteSchema,
 } from "@/lib/site-schema";
+import {
+  ensurePlannerMemoryPlan,
+  normalizePlannerRawToOutput,
+  type PlannerOutput,
+  type PlannerSlot,
+} from "@/lib/planner-normalize";
+import { layoutSchemaQA, applyLayoutReadabilityFallback } from "@/lib/layout-qa";
 import {
   getToolContextIfEnabled,
   type ToolContextPack,
@@ -55,6 +63,7 @@ import { PROMPT_VERSION, getPromptVersionsFlat } from "@/lib/prompt-registry";
 export { PROMPT_VERSION };
 import { combinedStaticSiteQa } from "@/lib/component-rules";
 import { serverRealQa } from "@/lib/real-qa-server";
+import { generateFallbackSiteSchema } from "@/lib/fallback-site";
 import {
   applyHitlAction,
   defaultHitlAction,
@@ -93,11 +102,7 @@ export type DesignSeed = {
   animationStyle: string;
 };
 
-export type PlannerOutput = {
-  pages: string[];
-  sections: string[];
-  goals: string[];
-};
+export type { PlannerOutput, PlannerSlot } from "@/lib/planner-normalize";
 
 export type ArchitectOutput = {
   layout: unknown;
@@ -426,21 +431,8 @@ async function refreshLongTermSummaryIfNeeded(
 // JSON helpers & zod
 // -----------------------------------------------------------------------------
 
-function extractJsonObjectText(text: string): string {
-  let t = text.trim();
-  const fence = t.match(/```(?:json)?\s*([\s\S]*?)```/);
-  if (fence) t = fence[1].trim();
-  return t;
-}
-
 const intentSchema = z.object({
   intentType: z.enum(["landing", "ecommerce", "saas", "portfolio", "blog", "other"]),
-});
-
-const plannerSchema = z.object({
-  pages: z.array(z.string()),
-  sections: z.array(z.string()),
-  goals: z.array(z.string()),
 });
 
 const architectSchema = z.object({
@@ -465,18 +457,13 @@ function safeParseJSON<T>(
   text: string,
   schema: z.ZodType<T>,
 ): { ok: true; data: T } | { ok: false; error: string } {
-  try {
-    const raw = extractJsonObjectText(text);
-    const parsed = JSON.parse(raw) as unknown;
-    const r = schema.safeParse(parsed);
-    if (r.success) return { ok: true, data: r.data };
-    return { ok: false, error: r.error.message };
-  } catch (e) {
-    return {
-      ok: false,
-      error: e instanceof Error ? e.message : "Invalid-json",
-    };
+  const parsed = safeParseJson<unknown>(text);
+  if (!parsed.ok) {
+    return { ok: false, error: "invalid_json" };
   }
+  const r = schema.safeParse(parsed.data);
+  if (r.success) return { ok: true, data: r.data };
+  return { ok: false, error: r.error.message };
 }
 
 type ParsedSiteSchemaOk = { ok: true; data: SiteSchema; schemaAutoFixed: boolean };
@@ -568,7 +555,7 @@ async function classifyIntent(
 ): Promise<void> {
   const sys = `Ты классификатор. Верни ТОЛЬКО JSON без markdown: {"intentType":"landing"|"ecommerce"|"saas"|"portfolio"|"blog"|"other"}.
 Интерпретируй весь userIntent целиком (в т.ч. доработки к уже готовому сайту). Не проси уточнений у пользователя.
-promptVersion: ${PROMPT_VERSION.intent}`;
+promptVersion: ${PROMPT_VERSION.intent}${JSON_OUTPUT_CRITICAL_RULES}`;
   const userPayload = `${formatAgentMemoryBlock(memory, "intent", cfg)}\n\nКлассифицируй намерение по полю userIntent в view выше.`;
   const { content, modelUsed } = await callAgent(
     "intent",
@@ -580,8 +567,12 @@ promptVersion: ${PROMPT_VERSION.intent}`;
     callOpts,
   );
   const p = safeParseJSON(content, intentSchema);
-  if (p.ok) memory.intentType = p.data.intentType;
-  else memory.intentType = "landing";
+  if (p.ok) {
+    memory.intentType = p.data.intentType;
+  } else {
+    pushDecision(memory, "intent", "json_fallback_used", `intent default landing: ${p.error}`);
+    memory.intentType = "landing";
+  }
   pushDecision(memory, "intent", `classified:${memory.intentType}`, `model:${modelUsed}`);
 }
 
@@ -673,9 +664,15 @@ async function planner(
     );
   }
 
-  const sys = `Спланируй лендинг. Верни ТОЛЬКО JSON: {"pages":string[],"sections":string[],"goals":string[]}.
-Секции — краткие имена блоков (hero, features, ...). Учти реальные примеры и данные из user-блока. promptVersion: ${PROMPT_VERSION.planner}
-${toolAwareSystemAppendix(cfg)}`;
+  const sys = `Спланируй лендинг. Верни ТОЛЬКО JSON-объект.
+
+PLAN SHAPE RULES:
+- "pages" и "sections" — массив объектов вида {"type":"hero"}, либо массив строк-имён блоков; внутри одного массива формат не смешивай.
+- "goals" — массив строк целей; если нечего добавить — ["generate landing page"].
+- Допустимые типы секций: hero, features, benefits, cta, footer, about, gallery, pricing, page, text.
+
+Форма: {"pages":[...], "sections":[...], "goals":[...]}. Учти REAL EXAMPLES / REAL DATA. promptVersion: ${PROMPT_VERSION.planner}
+${toolAwareSystemAppendix(cfg)}${JSON_OUTPUT_CRITICAL_RULES}`;
   const userBlock = `${formatAgentMemoryBlock(memory, "planner", cfg)}
 
 REAL EXAMPLES:
@@ -693,26 +690,44 @@ ${dataCtx.text}`;
     cfg,
     callOpts,
   );
-  let p = safeParseJSON(content, plannerSchema);
-  if (!p.ok) {
+  let planObj: unknown = undefined;
+  let usedFallback = false;
+  const primary = safeParseJson<unknown>(content);
+  if (primary.ok) {
+    planObj = primary.data;
+    if (primary.repaired) {
+      pushDecision(memory, "planner", "json_repair_attempt", "extractor repaired primary");
+    }
+  } else {
+    pushDecision(memory, "planner", "json_parse_failed", "planner primary invalid_json");
     const strict = await callAgent(
       "planner",
       [
         {
           role: "system",
-          content:
-            "Нужен строго валидный JSON-объект с ключами pages, sections, goals — массивы строк. Только JSON.",
+          content: `Верни строго валидный JSON: {"pages":[],"sections":[],"goals":[]}. pages и sections — массивы объектов {"type":"hero"} (допустимы и строки-синонимы). goals — строки.${JSON_OUTPUT_CRITICAL_RULES}`,
         },
         { role: "user", content: userBlock },
       ],
       cfg,
       callOpts,
     );
-    p = safeParseJSON(strict.content, plannerSchema);
-    if (!p.ok) throw new Error(`Planner: invalid JSON — ${p.error}`);
+    const retry = safeParseJson<unknown>(strict.content);
+    if (retry.ok) {
+      planObj = retry.data;
+      pushDecision(memory, "planner", "json_repair_attempt", "planner retry recovered");
+    } else {
+      pushDecision(memory, "planner", "json_fallback_used", "planner default plan");
+      usedFallback = true;
+    }
   }
-  memory.plan = p.data;
-  pushDecision(memory, "planner", "plan_saved", `model:${modelUsed}`);
+  memory.plan = normalizePlannerRawToOutput(planObj ?? {});
+  pushDecision(
+    memory,
+    "planner",
+    usedFallback ? "plan_saved_fallback" : "plan_saved",
+    `model:${modelUsed}`,
+  );
 }
 
 async function architect(
@@ -720,6 +735,7 @@ async function architect(
   cfg: PipelineConfig,
   callOpts: CallChatOptions,
 ): Promise<void> {
+  memory.plan = ensurePlannerMemoryPlan(memory.plan);
   const ui = await getToolContextIfEnabled(
     cfg,
     {
@@ -739,7 +755,7 @@ async function architect(
 
   const sys = `Ты архитектор UI. По плану верни ТОЛЬКО JSON: {"layout":{},"components":[],"designSystem":{}}.
 layout и designSystem — свободные объекты. Учти UI PATTERNS из user. promptVersion: ${PROMPT_VERSION.architect}
-${toolAwareSystemAppendix(cfg)}`;
+${toolAwareSystemAppendix(cfg)}${JSON_OUTPUT_CRITICAL_RULES}`;
   const userBlock = `${formatAgentMemoryBlock(memory, "architect", cfg)}
 
 UI PATTERNS:
@@ -756,13 +772,13 @@ ${ui.text}`;
   );
   let p = safeParseJSON(content, architectSchema);
   if (!p.ok) {
+    pushDecision(memory, "architect", "json_parse_failed", `architect primary: ${p.error}`);
     const strict = await callAgent(
       "architect",
       [
         {
           role: "system",
-          content:
-            "Строго JSON с ключами layout (object), components (array), designSystem (object). Только JSON.",
+          content: `Строго JSON с ключами layout (object), components (array), designSystem (object).${JSON_OUTPUT_CRITICAL_RULES}`,
         },
         { role: "user", content: userBlock },
       ],
@@ -770,7 +786,19 @@ ${ui.text}`;
       callOpts,
     );
     p = safeParseJSON(strict.content, architectSchema);
-    if (!p.ok) throw new Error(`Architect: invalid JSON — ${p.error}`);
+    if (!p.ok) {
+      pushDecision(memory, "architect", "json_fallback_used", `architect default after retry: ${p.error}`);
+      memory.architecture = {
+        layout: memory.architecture?.layout ?? {},
+        components: Array.isArray(memory.architecture?.components)
+          ? memory.architecture!.components
+          : [],
+        designSystem: memory.architecture?.designSystem ?? {},
+      };
+      pushDecision(memory, "architect", "architecture_default", `model:${modelUsed}`);
+      return;
+    }
+    pushDecision(memory, "architect", "json_repair_attempt", "architect retry recovered");
   }
   memory.architecture = {
     layout: p.data.layout ?? {},
@@ -807,7 +835,7 @@ async function architectRepairDesignSystem(
 Исправь designSystem: контраст пар цветов (≥4.5:1 для UI текста где возможно), шкала spacing (массив или объект положительных ступеней), typography (fontFamily или fonts + размеры).
 Ошибки: ${validation.allIssues.join("; ")}
 promptVersion: ${PROMPT_VERSION.architect}
-${toolAwareSystemAppendix(cfg)}`;
+${toolAwareSystemAppendix(cfg)}${JSON_OUTPUT_CRITICAL_RULES}`;
 
   const userBlock = `${formatAgentMemoryBlock(memory, "architect", cfg)}
 
@@ -828,12 +856,13 @@ ${JSON.stringify(memory.architecture).slice(0, 14_000)}`;
   );
   let p = safeParseJSON(content, architectSchema);
   if (!p.ok) {
+    pushDecision(memory, "architect", "json_parse_failed", `repair primary: ${p.error}`);
     const strict = await callAgent(
       "architect",
       [
         {
           role: "system",
-          content: "Строго JSON layout+components+designSystem. Только JSON.",
+          content: `Строго JSON layout+components+designSystem.${JSON_OUTPUT_CRITICAL_RULES}`,
         },
         { role: "user", content: userBlock },
       ],
@@ -842,9 +871,11 @@ ${JSON.stringify(memory.architecture).slice(0, 14_000)}`;
     );
     p = safeParseJSON(strict.content, architectSchema);
     if (!p.ok) {
+      pushDecision(memory, "architect", "json_fallback_used", `repair default: ${p.error}`);
       pushDecision(memory, "architect", "design_system_repair_failed", p.error);
       return;
     }
+    pushDecision(memory, "architect", "json_repair_attempt", "repair retry recovered");
   }
   memory.architecture = {
     layout: p.data.layout ?? memory.architecture?.layout ?? {},
@@ -861,6 +892,7 @@ async function engineerSiteJson(
   repairHint?: string,
   loopContext?: { designLoopIndex: number; previousAggregateQuality?: number },
 ): Promise<{ raw: string; modelUsed: string }> {
+  memory.plan = ensurePlannerMemoryPlan(memory.plan);
   const traceId = memory.sessionId;
   const audit = (e: ToolInvocationRecord) => recordToolInvocation(memory, e);
   const skipLog = { onSkipped: (r: string) => pushDecision(memory, "tool", "channel_skipped", r) };
@@ -949,7 +981,7 @@ async function engineerSiteJson(
       {
         role: "system",
         content: `${SITE_JSON_SYSTEM_PROMPT}
-${toolAwareSystemAppendix(cfg)}${memory.schemaAutoFixed ? ENGINEER_SCHEMA_AUTOFIX_APPENDIX : ""}`,
+${toolAwareSystemAppendix(cfg)}${memory.schemaAutoFixed ? ENGINEER_SCHEMA_AUTOFIX_APPENDIX : ""}${JSON_OUTPUT_CRITICAL_RULES}`,
       },
       { role: "user", content: userBits },
     ],
@@ -969,7 +1001,7 @@ async function selfCorrectSiteJson(
   const sys = `${SITE_JSON_SYSTEM_PROMPT}
 
 Исправь JSON ниже. Ошибка: ${err}
-Верни ТОЛЬКО исправленный сырой JSON (без markdown). promptVersion: ${PROMPT_VERSION.engineer}${memory.schemaAutoFixed ? ENGINEER_SCHEMA_AUTOFIX_APPENDIX : ""}`;
+Верни ТОЛЬКО исправленный сырой JSON (без markdown). promptVersion: ${PROMPT_VERSION.engineer}${memory.schemaAutoFixed ? ENGINEER_SCHEMA_AUTOFIX_APPENDIX : ""}${JSON_OUTPUT_CRITICAL_RULES}`;
   return callAgent(
     "engineer",
     [
@@ -978,6 +1010,42 @@ async function selfCorrectSiteJson(
         role: "user",
         content: `${formatAgentMemoryBlock(memory, "engineer", cfg)}\n\n---\nBROKEN_JSON:\n${broken}`,
       },
+    ],
+    cfg,
+    callOpts,
+  ).then((r) => ({ raw: r.content, modelUsed: r.modelUsed }));
+}
+
+/** Layout QA fixer: правит spacing/читаемость по списку замечаний (тот же канал, что engineer). */
+async function fixerSiteJsonForLayout(
+  memory: ProjectMemory,
+  cfg: PipelineConfig,
+  callOpts: CallChatOptions,
+  site: SiteSchema,
+  issues: string[],
+): Promise<{ raw: string; modelUsed: string }> {
+  const blob = issues.slice(0, 24).join("\n");
+  const sys = `${SITE_JSON_SYSTEM_PROMPT}
+
+Ты FIXER: исправь вёрстку и читаемость по замечаниям ниже. Сохрани структуру секций и смысл брифа.
+- Увеличь font-size слабых блоков (минимум ~15–16px эквивалент в clamp/rem).
+- line-height не ниже 1.25–1.45.
+- padding/margin/gap секций разумные (не «слипшиеся» блоки).
+- Убери риск наложений: меньше position:absolute без необходимости.
+
+Замечания:
+${blob}
+
+Верни ТОЛЬКО полный валидный JSON SiteSchema (сырой JSON). promptVersion: ${PROMPT_VERSION.engineer}${JSON_OUTPUT_CRITICAL_RULES}`;
+  const user = `${formatAgentMemoryBlock(memory, "engineer", cfg)}
+
+CURRENT_SITE_JSON:
+${JSON.stringify(site).slice(0, 16_000)}`;
+  return callAgent(
+    "engineer",
+    [
+      { role: "system", content: sys },
+      { role: "user", content: user },
     ],
     cfg,
     callOpts,
@@ -1033,7 +1101,7 @@ async function critic(
 Верни ТОЛЬКО JSON: {"findings": string[], "qualityScore": {"design":0-100,"ux":0-100,"performance":0-100,"accessibility":0-100}}
 Учитывай: герой и цели сайта, логичность CTA, противоречия между блоками, соответствие рыночным трендам (MARKET).
 promptVersion: ${PROMPT_VERSION.critic}
-${toolAwareSystemAppendix(cfg)}`;
+${toolAwareSystemAppendix(cfg)}${JSON_OUTPUT_CRITICAL_RULES}`;
 
   const siteSlice = rawJson.slice(0, 12_000);
   const userCritic = `${formatAgentMemoryBlock(memory, "critic", cfg)}
@@ -1263,7 +1331,7 @@ export async function runPipeline(args: {
         null,
         2,
       ).slice(0, 14_000),
-      planSections: [...(memory.plan?.sections ?? [])],
+      planSections: (memory.plan?.sections ?? []).map((s) => s.type),
     };
     await hitlGate(args, cfg, memory, pipelineEmit, 38, "architect", "confirm_architecture", archHitlPayload);
 
@@ -1324,7 +1392,17 @@ export async function runPipeline(args: {
             p = tryParseSiteSchema(engineered.raw);
             attempts += 1;
           }
-          if (!p.ok) throw new Error(`Engineer: invalid SiteSchema — ${p.error}`);
+          if (!p.ok) {
+            pushDecision(
+              memory,
+              "engineer",
+              "json_fallback_used",
+              `engineer fallback site after ${cfg.jsonRepairAttempts} repairs: ${p.error}`,
+            );
+            const fb = generateFallbackSiteSchema(memory.userIntent);
+            p = { ok: true, data: fb, schemaAutoFixed: true };
+            memory.schemaAutoFixed = true;
+          }
           if (p.schemaAutoFixed) {
             memory.schemaAutoFixed = true;
             if (!schemaStrictRetryUsed) {
@@ -1516,8 +1594,42 @@ export async function runPipeline(args: {
         pushDecision(memory, "pipeline", "draft_inner_cap", `steps=${innerStep}`);
       }
 
+      if (!parsed) throw new Error("Engineer: draft loop ended without parse");
+
+      let workingParsed: ParsedSiteSchemaOk = parsed;
+      let workingRaw = rawSiteJson;
+
+      for (let li = 0; li < 2; li++) {
+        const lq = layoutSchemaQA(workingParsed.data);
+        if (lq.ok) break;
+        pushDecision(memory, "qa", "layout_schema_qa", lq.issues.join("; ").slice(0, 900));
+        pipelineEmit({
+          stage: "layout_fix",
+          progress: progressForStage("loop", iteration + 0.15, cfg.designIterations),
+          detail: lq.issues[0]?.slice(0, 160),
+          iteration,
+        });
+        const fx = await fixerSiteJsonForLayout(memory, cfg, callOpts, workingParsed.data, lq.issues);
+        const fp = tryParseSiteSchema(fx.raw);
+        if (!fp.ok) {
+          pushDecision(memory, "qa", "layout_fixer_parse_failed", fp.error.slice(0, 240));
+          const patched = applyLayoutReadabilityFallback(workingParsed.data);
+          workingParsed = { ok: true, data: patched, schemaAutoFixed: true };
+          workingRaw = JSON.stringify(patched);
+          memory.rawSiteJson = workingRaw;
+          memory.schemaAutoFixed = true;
+          break;
+        }
+        workingParsed = fp;
+        workingRaw = JSON.stringify(fp.data);
+        memory.rawSiteJson = workingRaw;
+        if (fp.schemaAutoFixed) memory.schemaAutoFixed = true;
+      }
+
+      parsed = workingParsed;
+      rawSiteJson = workingRaw;
+
       const parsedFinal = parsed;
-      if (!parsedFinal) throw new Error("Engineer: draft loop ended without parse");
 
       let criticResult: CriticReport | null = null;
       let qaResult: QAReport | null = null;
@@ -1674,8 +1786,20 @@ export async function runPipeline(args: {
       }
     }
 
-    const finalParse = tryParseSiteSchema(rawSiteJson);
-    if (!finalParse.ok) throw new Error(finalParse.error);
+    let finalParse = tryParseSiteSchema(rawSiteJson);
+    if (!finalParse.ok) {
+      pushDecision(
+        memory,
+        "pipeline",
+        "json_fallback_used",
+        `final fallback site: ${finalParse.error}`,
+      );
+      const fb = generateFallbackSiteSchema(memory.userIntent);
+      rawSiteJson = JSON.stringify(fb);
+      memory.rawSiteJson = rawSiteJson;
+      finalParse = { ok: true, data: fb, schemaAutoFixed: true };
+      memory.schemaAutoFixed = true;
+    }
     if (finalParse.schemaAutoFixed) memory.schemaAutoFixed = true;
     memory.siteSchema = finalParse.data;
     memory.code = {

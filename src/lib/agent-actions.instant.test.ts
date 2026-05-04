@@ -23,6 +23,7 @@ function minimalSite(): SiteSchema {
     styles: { theme: "light" },
     animations: {},
     images: [],
+    goals: [],
   };
 }
 

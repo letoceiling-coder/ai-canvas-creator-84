@@ -31,9 +31,11 @@ export type DesignSeedView = {
   animationStyle: string;
 };
 
+export type PlannerSlotView = { type: string };
+
 export type PlannerOutputView = {
-  pages: string[];
-  sections: string[];
+  pages: PlannerSlotView[];
+  sections: PlannerSlotView[];
   goals: string[];
 };
 

@@ -96,8 +96,8 @@ function buildHitlResumeAction(
   if (payload.checkpoint !== "confirm_plan") {
     return { type: "confirm_plan" };
   }
-  const p = hitlSplitLines(pages);
-  const sec = hitlSplitLines(sections);
+  const p = hitlSplitLines(pages).map((type) => ({ type }));
+  const sec = hitlSplitLines(sections).map((type) => ({ type }));
   const g = hitlSplitLines(goals);
   const patch: PlanPatch = {};
   if (JSON.stringify(p) !== JSON.stringify(payload.plan.pages)) patch.pages = p;
@@ -186,8 +186,8 @@ function Index() {
   useEffect(() => {
     if (!hitlPayload) return;
     if (hitlPayload.checkpoint === "confirm_plan") {
-      setHitlPages(hitlPayload.plan.pages.join("\n"));
-      setHitlSections(hitlPayload.plan.sections.join("\n"));
+      setHitlPages(hitlPayload.plan.pages.map((x) => x.type).join("\n"));
+      setHitlSections(hitlPayload.plan.sections.map((x) => x.type).join("\n"));
       setHitlGoals(hitlPayload.plan.goals.join("\n"));
       const d = hitlPayload.styleDNA;
       setHitlVibe(d?.vibe ?? "");
@@ -336,7 +336,7 @@ function Index() {
       }
 
       setPipelineRunning(true);
-      setPipelineStatus("Анализирую задачу и подбираю структуру…");
+      setPipelineStatus("Анализирую задачу…");
       setHitlPayload(null);
       const ts = tokenStreamRef.current;
       ts.buf = "";
@@ -351,7 +351,15 @@ function Index() {
         : inferStyleDNAFromUserIntent(pipelinePrompt);
 
       try {
-        setPipelineStatus("Генерация на сервере…");
+        await new Promise<void>((r) => {
+          window.setTimeout(r, 350);
+        });
+        setPipelineStatus("Строю структуру…");
+        await new Promise<void>((r) => {
+          window.setTimeout(r, 350);
+        });
+        setPipelineStatus("Улучшаю дизайн…");
+
         const pipelineResult = await serverRunPipeline({
           data: {
             prompt: pipelinePrompt,
@@ -365,8 +373,24 @@ function Index() {
         });
 
         if (!pipelineResult.ok) {
-          throw new Error(pipelineResult.error);
+          setChatMessages((m) => [
+            ...m,
+            {
+              id: crypto.randomUUID(),
+              role: "assistant",
+              content:
+                "Сервис временно не ответил. Попробуйте отправить запрос ещё раз через несколько секунд.",
+              at: Date.now(),
+            },
+          ]);
+          return;
         }
+
+        setPipelineStatus("Финализирую…");
+        await new Promise<void>((r) => {
+          window.setTimeout(r, 280);
+        });
+
         const memory = pipelineResult.memory;
 
         const site = memory.siteSchema;
@@ -376,7 +400,8 @@ function Index() {
             {
               id: crypto.randomUUID(),
               role: "assistant",
-              content: "Не удалось получить валидный сайт. Попробуйте уточнить запрос.",
+              content:
+                "Подготовил упрощённый вариант превью. Опишите сайт чуть подробнее или попробуйте снова — доработаю полную версию.",
               at: Date.now(),
             },
           ]);
@@ -404,14 +429,15 @@ function Index() {
           },
         ]);
       } catch (e) {
-        const msg = e instanceof Error ? e.message : "Ошибка запроса";
+        console.error(e);
         setPipelineStatus(null);
         setChatMessages((m) => [
           ...m,
           {
             id: crypto.randomUUID(),
             role: "assistant",
-            content: `Ошибка: ${msg}`,
+            content:
+              "Связь прервалась или ответ ещё обрабатывается. Нажмите «Отправить» ещё раз или сократите запрос — технические детали не показываю.",
             at: Date.now(),
           },
         ]);

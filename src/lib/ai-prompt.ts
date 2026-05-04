@@ -46,7 +46,13 @@ export const SITE_JSON_SYSTEM_PROMPT = `Ты генерируешь структ
 - imageUrl — только валидный https (из IMAGE REFERENCES / placehold.co / прямой URL провайдера).
 - "images": [] — массив URL превью (можно пустой: клиент добавит детерминированные placehold.co по ключевым словам промпта).
 
-Поведение chat-first: theme (dark/light), характер секций и визуала выводи из текста брифа пользователя. Не предполагай, что пользователь выберет стиль в отдельной форме.`;
+Поведение chat-first: theme (dark/light), характер секций и визуала выводи из текста брифа пользователя. Не предполагай, что пользователь выберет стиль в отдельной форме.
+
+AGENT MUST:
+- NEVER ask the user to choose a visual style in a separate step — infer from the brief.
+- NEVER expose raw JSON/Zod/schema errors to the end user; output only valid SiteSchema.
+- ALWAYS prefer auto-fixing structure (valid blocks, filled defaults) over failing.
+- ALWAYS return a usable single-page experience when possible.`;
 
 /** Доп. системный текст для engineer после серверного авто-исправления схемы (см. normalizeLooseSiteSchemaInputDetailed). */
 export const ENGINEER_SCHEMA_AUTOFIX_APPENDIX = `

@@ -2,13 +2,16 @@
  * §9 Human-in-the-loop — мульти-чекпоинт: план / архитектура / черновик.
  */
 
-export type PlannerOutputShape = {
-  pages: string[];
-  sections: string[];
-  goals: string[];
-};
+import type { PlannerOutput } from "@/lib/planner-normalize";
+import { normalizePlanSlots } from "@/lib/planner-normalize";
 
-export type PlanPatch = Partial<PlannerOutputShape>;
+export type PlannerOutputShape = PlannerOutput;
+
+/** pages/sections — unknown: нормализуем через normalizePlanSlots (строка | { type } | мусор). */
+export type PlanPatch = Partial<Pick<PlannerOutput, "goals">> & {
+  pages?: unknown;
+  sections?: unknown;
+};
 
 export type StyleDNAShape = {
   vibe: string;
@@ -73,8 +76,17 @@ export type MemoryHitlTarget = {
 };
 
 export function applyPlanPatch(memory: MemoryHitlTarget, patch: PlanPatch): void {
-  const base: PlannerOutputShape = memory.plan ?? { pages: [], sections: [], goals: [] };
-  memory.plan = { ...base, ...patch };
+  const base: PlannerOutput = memory.plan ?? { pages: [], sections: [], goals: [] };
+  let goals =
+    patch.goals !== undefined
+      ? patch.goals.map((g) => String(g).trim()).filter(Boolean)
+      : base.goals;
+  if (goals.length === 0) goals = ["generate landing page"];
+  memory.plan = {
+    pages: normalizePlanSlots(patch.pages !== undefined ? patch.pages : base.pages),
+    sections: normalizePlanSlots(patch.sections !== undefined ? patch.sections : base.sections),
+    goals,
+  };
 }
 
 export function updateStyleDNA(memory: MemoryHitlTarget, dna: Partial<StyleDNAShape>): void {
@@ -128,7 +140,7 @@ export function applyHitlAction(memory: MemoryHitlTarget, action: HITLAction): v
         applyArchitecturePatch(memory, a.patch);
         return;
       case "reorder_sections":
-        applyPlanPatch(memory, { sections: a.order });
+        applyPlanPatch(memory, { sections: normalizePlanSlots(a.order) });
         return;
       case "regenerate_section":
       case "refine_all":

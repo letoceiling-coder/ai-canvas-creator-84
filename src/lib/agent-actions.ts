@@ -84,6 +84,34 @@ function hasReviewsHeuristic(site: SiteSchema): boolean {
   });
 }
 
+/** Увеличить вертикальные отступы у всех блоков (мгновенная правка). */
+export function bumpAllBlockSpacing(site: SiteSchema): SiteSchema {
+  const bump = (b: SiteBlock): SiteBlock => {
+    const st = { ...(typeof b.styles === "object" && b.styles ? b.styles : {}) } as Record<string, unknown>;
+    const px = (k: string): number => {
+      const v = st[k];
+      if (typeof v === "number" && !Number.isNaN(v)) return v;
+      if (typeof v === "string") {
+        const m = v.match(/^([\d.]+)\s*px$/i);
+        if (m) return parseFloat(m[1]!);
+      }
+      return 0;
+    };
+    const pt = px("paddingTop");
+    const pb = px("paddingBottom");
+    st.paddingTop = `${Math.max(pt + 24, 48)}px`;
+    st.paddingBottom = `${Math.max(pb + 20, 40)}px`;
+    if (st.gap == null) st.gap = "24px";
+    return { ...b, styles: st };
+  };
+  return {
+    ...site,
+    pages: site.pages.map(bump),
+    sections: site.sections.map(bump),
+    components: site.components.map(bump),
+  };
+}
+
 function insertBlockBeforeFooter(sections: SiteBlock[], block: SiteBlock): SiteBlock[] {
   const ft = sections.findIndex((s) => s.type === "footer");
   if (ft >= 0) {
@@ -200,6 +228,12 @@ export function applyInstantSiteAction(
         };
       }
       return { site, summary: "Такой блок пока лучше добавить через полную генерацию." };
+    }
+    case "increase_spacing": {
+      return {
+        site: bumpAllBlockSpacing(site),
+        summary: "Увеличил отступы между секциями (padding блоков).",
+      };
     }
   }
 }

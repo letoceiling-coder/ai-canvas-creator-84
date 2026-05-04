@@ -8,6 +8,9 @@ import { createServerFn } from "@tanstack/react-start";
 import { z } from "zod";
 import { runPipeline } from "@/lib/orchestrator";
 import type { PipelineConfig, ProjectMemory, StyleDNA } from "@/lib/orchestrator";
+import { generateFallbackSiteSchema } from "@/lib/fallback-site";
+import { createDecisionEntry } from "@/lib/decision-log";
+import { createSessionMetrics, finalizeSessionMetrics } from "@/lib/session-metrics";
 
 const styleDNASchema = z.object({
   vibe: z.string(),
@@ -44,6 +47,23 @@ export const serverRunPipeline = createServerFn({ method: "POST" })
       return { ok: true, memory };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      return { ok: false, error: msg };
+      const site = generateFallbackSiteSchema(data.prompt);
+      const raw = JSON.stringify(site);
+      const sm = createSessionMetrics();
+      sm.errors.push(msg);
+      sm.success = false;
+      finalizeSessionMetrics(sm);
+      const memory: ProjectMemory = {
+        sessionId: crypto.randomUUID(),
+        userIntent: data.prompt,
+        decisionLog: [createDecisionEntry("pipeline", "emergency_fallback", msg.slice(0, 500))],
+        sessionGenerationEpoch: 0,
+        sessionMetrics: sm,
+        siteSchema: site,
+        rawSiteJson: raw,
+        code: { files: [{ path: "site.json", content: raw }] },
+        schemaAutoFixed: true,
+      };
+      return { ok: true, memory };
     }
   });

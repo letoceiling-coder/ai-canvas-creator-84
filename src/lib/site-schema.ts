@@ -37,6 +37,12 @@ export const siteSchemaSchema = z.object({
   components: z.array(siteBlockSchema),
   styles: z.record(z.unknown()),
   animations: z.record(z.unknown()),
+  /** Цели генерации (совместимость с планировщиком / SSOT). */
+  goals: z
+    .union([z.array(z.string()), z.null(), z.undefined()])
+    .transform((v) =>
+      Array.isArray(v) ? v.filter((s): s is string => typeof s === "string") : [],
+    ),
   images: z
     .union([z.array(z.string()), z.null(), z.undefined()])
     .transform((v) =>
@@ -223,6 +229,13 @@ export function normalizeLooseSiteSchemaInputDetailed(
       if (fixed) schemaAutoFixed = true;
       out.images = images;
     }
+  }
+
+  if (!("goals" in out) || !Array.isArray(out.goals)) {
+    out.goals = ["generate landing page"];
+    schemaAutoFixed = true;
+  } else {
+    out.goals = (out.goals as unknown[]).filter((x): x is string => typeof x === "string");
   }
 
   return { value: out, schemaAutoFixed };

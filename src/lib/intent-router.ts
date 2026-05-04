@@ -10,7 +10,8 @@ export type InstantAction =
   | { type: "style_accent_premium" }
   | { type: "add_section"; sectionType: SectionType; variant?: "reviews" | "pricing" | "default" }
   | { type: "remove_section"; sectionType: SectionType }
-  | { type: "bring_section_forward"; sectionType: SectionType };
+  | { type: "bring_section_forward"; sectionType: SectionType }
+  | { type: "increase_spacing" };
 
 export type RoutedIntent =
   | { kind: "full_pipeline"; reason: string }
@@ -56,6 +57,12 @@ function wantsPricing(t: string): boolean {
   return /(тариф|прайс|цен|pricing|подписк)/i.test(t);
 }
 
+function wantsMoreSpacing(t: string): boolean {
+  return /(отступ|побольше\s+воздух|больше\s+пространств|больше\s+воздуха|spacing|padding|разреж)/i.test(
+    t,
+  );
+}
+
 function wantsRemove(lower: string, t: string): SectionType | null {
   if (!/(убери|удали|убрать|удалить|убрать\s+секц)/i.test(t)) return null;
   if (/(тариф|прайс|pricing|цен)/i.test(t)) return "pricing";
@@ -95,6 +102,14 @@ export function resolveUserIntent(message: string, hasSite: boolean): RoutedInte
   }
   if (wantsStyleThemeLight(t)) {
     return { kind: "instant", action: { type: "style_theme", theme: "light" }, reason: "Смена темы на светлую." };
+  }
+
+  if (wantsMoreSpacing(t)) {
+    return {
+      kind: "instant",
+      action: { type: "increase_spacing" },
+      reason: "Увеличение отступов между секциями.",
+    };
   }
 
   if (/(премиум|premium)\s*(стил|вид|оформл)/i.test(t) || /^сделай\s+премиум/i.test(t.trim())) {
