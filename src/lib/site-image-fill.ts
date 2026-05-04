@@ -1,61 +1,5 @@
 import type { SiteSchema } from "@/lib/site-schema";
 
-const STOP = new Set([
-  "the",
-  "a",
-  "an",
-  "and",
-  "or",
-  "for",
-  "to",
-  "of",
-  "in",
-  "on",
-  "with",
-  "is",
-  "are",
-  "из",
-  "и",
-  "в",
-  "на",
-  "с",
-  "по",
-  "для",
-  "как",
-  "это",
-  "к",
-  "от",
-  "за",
-]);
-
-function keywordQueriesFromPrompt(prompt: string): string[] {
-  const cleaned = prompt.replace(/\s+/g, " ").trim();
-  if (!cleaned) return ["hero"];
-
-  const chunks = cleaned
-    .split(/[,;.\n]+/)
-    .map((s) => s.trim())
-    .filter((s) => s.length >= 3);
-  const out: string[] = [];
-  for (const c of chunks) {
-    out.push(c.slice(0, 100));
-  }
-
-  if (out.length === 0) {
-    const words = cleaned.split(" ").filter((w) => {
-      const t = w.toLowerCase().replace(/[^\p{L}\p{N}-]/gu, "");
-      return t.length > 2 && !STOP.has(t);
-    });
-    if (words.length >= 2) {
-      out.push(words.slice(0, 8).join(" "));
-    } else {
-      out.push(cleaned.slice(0, 80));
-    }
-  }
-
-  return [...new Set(out)].slice(0, 6);
-}
-
 function simpleHash(s: string): string {
   let h = 5381;
   for (let i = 0; i < s.length; i++) {
@@ -64,15 +8,57 @@ function simpleHash(s: string): string {
   return (h >>> 0).toString(16);
 }
 
-/** Детерминированные визуальные слоты (placehold.co), без source.unsplash.com. */
+/**
+ * Палитра премиум-плейсхолдеров: чистые градиенты без текста.
+ * Хеш промпта детерминирует выбор → стабильные между прогонами картинки,
+ * но разные между разными темами.
+ */
+const GRADIENT_PALETTES: ReadonlyArray<readonly [string, string]> = [
+  ["1e1b4b", "5b21b6"], // indigo → violet
+  ["0c4a6e", "0891b2"], // sky → cyan
+  ["18181b", "3f3f46"], // dark slate
+  ["1e293b", "475569"], // navy slate
+  ["422006", "92400e"], // amber depth
+  ["052e16", "166534"], // forest green
+  ["4a044e", "a21caf"], // fuchsia
+  ["1c1917", "57534e"], // stone
+  ["1e3a8a", "1d4ed8"], // royal blue
+  ["111827", "374151"], // graphite
+];
+
+/**
+ * Возвращает SVG-data-URI с радиальным/линейным градиентом.
+ * НЕ содержит текста — никаких визуальных «протечек» промпта в карточки.
+ */
+function gradientDataUri(seedKey: string, idx: number, w = 1600, h = 900): string {
+  const palette = GRADIENT_PALETTES[
+    parseInt(simpleHash(`${seedKey}:${idx}`).slice(0, 4), 16) % GRADIENT_PALETTES.length
+  ]!;
+  const [a, b] = palette;
+  const angle = (parseInt(simpleHash(`${seedKey}:angle:${idx}`).slice(0, 2), 16) % 360);
+  const svg = `<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 ${w} ${h}' width='${w}' height='${h}'>
+  <defs>
+    <linearGradient id='g' gradientTransform='rotate(${angle})'>
+      <stop offset='0%' stop-color='#${a}'/>
+      <stop offset='100%' stop-color='#${b}'/>
+    </linearGradient>
+    <radialGradient id='r' cx='${30 + (idx % 3) * 20}%' cy='${20 + (idx % 4) * 15}%' r='65%'>
+      <stop offset='0%' stop-color='#fff' stop-opacity='0.18'/>
+      <stop offset='100%' stop-color='#fff' stop-opacity='0'/>
+    </radialGradient>
+  </defs>
+  <rect width='100%' height='100%' fill='url(#g)'/>
+  <rect width='100%' height='100%' fill='url(#r)'/>
+</svg>`;
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+}
+
+/** Премиум-плейсхолдеры по теме промпта: чистые SVG-градиенты без текста. */
 export function deterministicFillImageUrls(prompt: string, count = 6): string[] {
-  const queries = keywordQueriesFromPrompt(prompt);
+  const seedKey = simpleHash(prompt.trim().slice(0, 200) || "default");
   const urls: string[] = [];
   for (let i = 0; i < count; i++) {
-    const query = queries[i % queries.length];
-    const enc = encodeURIComponent(query.slice(0, 40));
-    const sig = simpleHash(`${query}:${i}`);
-    urls.push(`https://placehold.co/1600x900/1e293b/94a3b8/png?text=${enc}&sig=${sig}`);
+    urls.push(gradientDataUri(seedKey, i));
   }
   return urls;
 }

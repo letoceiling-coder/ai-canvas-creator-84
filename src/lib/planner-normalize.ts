@@ -14,10 +14,15 @@ export type PlannerOutput = {
   goals: string[];
 };
 
+/** Премиум-структура: header + продающие блоки + footer (минимум 7 секций). */
 export const PLANNER_DEFAULT_SECTION_TYPES = [
+  "header",
   "hero",
   "features",
   "benefits",
+  "testimonials",
+  "process",
+  "contacts",
   "cta",
   "footer",
 ] as const;

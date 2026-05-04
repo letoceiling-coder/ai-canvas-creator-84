@@ -64,6 +64,8 @@ export { PROMPT_VERSION };
 import { combinedStaticSiteQa } from "@/lib/component-rules";
 import { serverRealQa } from "@/lib/real-qa-server";
 import { generateFallbackSiteSchema } from "@/lib/fallback-site";
+import { enrichSitePremium } from "@/lib/premium-enricher";
+import { cleanUserPrompt } from "@/lib/input-cleaner";
 import {
   applyHitlAction,
   defaultHitlAction,
@@ -1217,16 +1219,29 @@ export async function runPipeline(args: {
     emit(args.onEvent, e);
   };
 
+  const cleaned = cleanUserPrompt(args.prompt);
   const memory: ProjectMemory = {
     sessionId: crypto.randomUUID(),
-    userIntent: args.prompt,
+    userIntent: cleaned.prompt,
     decisionLog: [],
     sessionGenerationEpoch: 0,
     sessionMetrics: createSessionMetrics(),
     ...(args.initialStyleDNA
       ? { styleDNA: { ...args.initialStyleDNA } }
       : {}),
+    ...(cleaned.constraints.length > 0 ? { constraints: cleaned.constraints } : {}),
   };
+  if (cleaned.truncated) {
+    pushDecision(
+      memory,
+      "pipeline",
+      "input_cleaned_truncated",
+      `${cleaned.originalLength}→${cleaned.prompt.length} chars`,
+    );
+  }
+  if (cleaned.constraints.length > 0) {
+    pushDecision(memory, "pipeline", "input_constraints", cleaned.constraints.join("; "));
+  }
   if (memory.sessionMetrics) {
     memory.sessionMetrics.promptVersions = getPromptVersionsFlat();
     memory.sessionMetrics.partialRegens = 0;
@@ -1801,7 +1816,23 @@ export async function runPipeline(args: {
       memory.schemaAutoFixed = true;
     }
     if (finalParse.schemaAutoFixed) memory.schemaAutoFixed = true;
-    memory.siteSchema = finalParse.data;
+
+    // Premium enricher: гарантирует header/footer/cta + минимум по items.
+    const enriched = enrichSitePremium(finalParse.data, memory.userIntent);
+    if (
+      enriched.sections.length !== finalParse.data.sections.length ||
+      JSON.stringify(enriched.sections) !== JSON.stringify(finalParse.data.sections)
+    ) {
+      pushDecision(
+        memory,
+        "pipeline",
+        "premium_enriched",
+        `sections ${finalParse.data.sections.length}→${enriched.sections.length}`,
+      );
+      rawSiteJson = JSON.stringify(enriched);
+      memory.rawSiteJson = rawSiteJson;
+    }
+    memory.siteSchema = enriched;
     memory.code = {
       files: [{ path: "site.json", content: rawSiteJson }],
     };
