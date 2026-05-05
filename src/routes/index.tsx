@@ -26,6 +26,19 @@ import type { DeployHistoryEntry } from "@/components/builder/Canvas";
 
 const DEPLOY_HISTORY_KEY = "ai-builder-deploy-history-v1";
 
+/** Ниже nginx proxy_read_timeout (1800s), чтобы UI не «висел» бесконечно при обрыве. */
+const PIPELINE_CLIENT_TIMEOUT_MS = 1_650_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  }) as Promise<T>;
+}
+
 function readDeployHistory(): DeployHistoryEntry[] {
   try {
     const raw = localStorage.getItem(DEPLOY_HISTORY_KEY);
@@ -431,13 +444,16 @@ function Index() {
       } catch (e) {
         console.error(e);
         setPipelineStatus(null);
+        const timeout =
+          e instanceof Error && e.message === "pipeline_client_timeout"
+            ? "Генерация прервалась по таймауту (~27 мин). Откройте вкладку заново и отправьте запрос ещё раз; при длинных брифах разбейте задачу на 2 сообщения."
+            : "Связь прервалась или ответ ещё обрабатывается. Обновите страницу и отправьте запрос снова; при длинной генерации не закрывайте вкладку — технические детали не показываю.";
         setChatMessages((m) => [
           ...m,
           {
             id: crypto.randomUUID(),
             role: "assistant",
-            content:
-              "Связь прервалась или ответ ещё обрабатывается. Нажмите «Отправить» ещё раз или сократите запрос — технические детали не показываю.",
+            content: timeout,
             at: Date.now(),
           },
         ]);
