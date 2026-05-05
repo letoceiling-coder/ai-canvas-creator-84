@@ -373,19 +373,24 @@ function Index() {
         });
         setPipelineStatus("Улучшаю дизайн…");
 
-        const pipelineResult = await serverRunPipeline({
-          data: {
-            prompt: pipelinePrompt,
-            config: {
-              enableHITL: adv.enableHITL,
-              designIterations: adv.designIterations,
-              qualityThreshold: adv.qualityThreshold,
+        const pipelineResult = await withTimeout(
+          serverRunPipeline({
+            data: {
+              prompt: pipelinePrompt,
+              config: {
+                enableHITL: adv.enableHITL,
+                designIterations: adv.designIterations,
+                qualityThreshold: adv.qualityThreshold,
+              },
+              initialStyleDNA,
             },
-            initialStyleDNA,
-          },
-        });
+          }),
+          PIPELINE_CLIENT_TIMEOUT_MS,
+          "pipeline_client_timeout",
+        );
 
         if (!pipelineResult.ok) {
+          setPipelineStatus(null);
           setChatMessages((m) => [
             ...m,
             {
@@ -408,6 +413,7 @@ function Index() {
 
         const site = memory.siteSchema;
         if (!site) {
+          setPipelineStatus(null);
           setChatMessages((m) => [
             ...m,
             {
